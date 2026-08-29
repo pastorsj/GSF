@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter
+from fastapi import HTTPException
+from pydantic import BaseModel
+from pydantic import Field
 
+from gsf.dal import datasources as datasources_dal
 from gsf.retrieval.entity_coverage.state import DEFAULT_MAX_DISTANCE
 from gsf.server.metadata import service as dal
 from gsf.server.responses import EntityCoverageResponse
@@ -20,13 +23,35 @@ class EntityCoverageRequest(BaseModel):
     """Payload for the entity-coverage route."""
 
     question: str = Field(..., min_length=1)
+    target_db: str | None = Field(
+        default=None,
+        description=(
+            "Catalog database UUID or name used to scope semantic retrieval when multiple databases are connected."
+        ),
+    )
     max_distance: float = Field(
         default=DEFAULT_MAX_DISTANCE,
         gt=0.0,
-        description=(
-            "Maximum L2 vector distance for a candidate to count "
-            "(lower score = closer match)."
-        ),
+        description=("Maximum L2 vector distance for a candidate to count (lower score = closer match)."),
+    )
+
+
+def _resolve_coverage_target_db(target_db: str | None) -> str | None:
+    """Resolve a catalog database UUID or name to its canonical name."""
+    if target_db is None or not target_db.strip():
+        return None
+
+    requested = target_db.strip()
+    databases = datasources_dal.fetch_databases(zone_ids=None)
+    for database in databases:
+        database_id = str(database.get("id") or "").strip()
+        database_name = str(database.get("name") or "").strip()
+        if database_name and (requested == database_id or requested.casefold() == database_name.casefold()):
+            return database_name
+
+    raise HTTPException(
+        status_code=422,
+        detail=(f"target_db {target_db!r} does not match a catalog database UUID or name."),
     )
 
 
@@ -40,10 +65,12 @@ def entity_coverage(body: EntityCoverageRequest) -> dict:
 
     Returns 422 when the flow cannot produce a result for the question.
     """
+    target_db = _resolve_coverage_target_db(body.target_db)
     try:
         result = dal.entity_coverage(
             body.question,
             max_distance=body.max_distance,
+            target_db=target_db,
         )
     except dal.PredictionFlowError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

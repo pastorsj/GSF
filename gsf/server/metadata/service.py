@@ -16,18 +16,16 @@ from __future__ import annotations
 import logging
 import threading
 
+from gsf.connectors.registry import get_connectors
 from gsf.retrieval.entity_coverage.main import get_coverage_response
 from gsf.retrieval.entity_coverage.main import llm_client as coverage_llm_client
-from gsf.retrieval.entity_coverage.state import (
-    DEFAULT_MAX_DISTANCE,
-    EntityCoveragePayload,
-)
-from gsf.server.chat.settings_dal import fetch_acronyms, fetch_custom_prompts
-from gsf.connectors.registry import get_connectors
-from gsf.utils.retriever import (
-    get_data_objects_retriever,
-    get_semantic_objects_retriever,
-)
+from gsf.retrieval.entity_coverage.state import DEFAULT_MAX_DISTANCE
+from gsf.retrieval.entity_coverage.state import EntityCoveragePayload
+from gsf.retrieval.text_to_sql.connector_routing import resolve_target_database_name
+from gsf.server.chat.settings_dal import fetch_acronyms
+from gsf.server.chat.settings_dal import fetch_custom_prompts
+from gsf.utils.retriever import get_data_objects_retriever
+from gsf.utils.retriever import get_semantic_objects_retriever
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +41,14 @@ class PredictionFlowError(RuntimeError):
 def _build_coverage_payload(
     question: str,
     max_distance: float = DEFAULT_MAX_DISTANCE,
+    target_db: str | None = None,
 ) -> EntityCoveragePayload:
     """Assemble the payload for the entity-coverage pipeline."""
     connectors = get_connectors()
     if not connectors:
         raise PredictionFlowError("No database connection is configured.")
     custom_prompts = fetch_custom_prompts()
-    return {
+    payload: EntityCoveragePayload = {
         "question": question,
         "data_retriever": get_data_objects_retriever(),
         "semantic_retriever": get_semantic_objects_retriever(),
@@ -58,11 +57,18 @@ def _build_coverage_payload(
         "custom_prompts": custom_prompts,
         "max_distance": max_distance,
     }
+    if target_db:
+        try:
+            payload["target_db"] = resolve_target_database_name(target_db, connectors)
+        except ValueError as exc:
+            raise PredictionFlowError(str(exc)) from exc
+    return payload
 
 
 def entity_coverage(
     question: str,
     max_distance: float = DEFAULT_MAX_DISTANCE,
+    target_db: str | None = None,
 ) -> dict:
     """Return ranked semantic candidates and a 0–1 entity coverage grade.
 
@@ -73,7 +79,11 @@ def entity_coverage(
     with _run_lock:
         try:
             return get_coverage_response(
-                _build_coverage_payload(question, max_distance=max_distance)
+                _build_coverage_payload(
+                    question,
+                    max_distance=max_distance,
+                    target_db=target_db,
+                )
             )
         except (ValueError, RuntimeError) as exc:
             raise PredictionFlowError(str(exc)) from exc
