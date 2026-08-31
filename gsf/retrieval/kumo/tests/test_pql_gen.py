@@ -1,19 +1,17 @@
 import pandas as pd
 import pytest
-
 from gsf.retrieval.kumo import pql_gen
-from gsf.retrieval.kumo.pql_gen import (
-    _NeighbourhoodMemo,
-    _is_context_capacity_error,
-    _is_context_size_limit_error,
-    _is_transient_exec_error,
-    _predict_resilient,
-    _resolve_indices,
-    _retry_at_full_neighbourhood,
-    canonicalize_pql_identifiers,
-    extract_pql,
-    parse_entity,
-)
+from gsf.retrieval.kumo.pql_gen import _forecast_anchor
+from gsf.retrieval.kumo.pql_gen import _is_context_capacity_error
+from gsf.retrieval.kumo.pql_gen import _is_context_size_limit_error
+from gsf.retrieval.kumo.pql_gen import _is_transient_exec_error
+from gsf.retrieval.kumo.pql_gen import _NeighbourhoodMemo
+from gsf.retrieval.kumo.pql_gen import _predict_resilient
+from gsf.retrieval.kumo.pql_gen import _resolve_indices
+from gsf.retrieval.kumo.pql_gen import _retry_at_full_neighbourhood
+from gsf.retrieval.kumo.pql_gen import canonicalize_pql_identifiers
+from gsf.retrieval.kumo.pql_gen import extract_pql
+from gsf.retrieval.kumo.pql_gen import parse_entity
 
 # The SDK's client-side per-table row cap (kumorfm.rfm.payload.validate_payload_table_rows).
 _ROW_LIMIT_ERROR = (
@@ -34,6 +32,14 @@ class _Connector:
 class _UnexpectedConnector:
     def execute(self, _sql: str) -> pd.DataFrame:
         raise AssertionError("source database should not be queried")
+
+
+class _MaxTimestampConnector:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def execute(self, _sql: str) -> pd.DataFrame:
+        return pd.DataFrame({"m": [self.value]})
 
 
 def test_extract_pql_ignores_predict_in_explanatory_prose() -> None:
@@ -59,9 +65,7 @@ FOR EACH jobs.job_id
 
 
 def test_canonicalize_pql_identifiers_uses_graph_casing() -> None:
-    graph_ddl = (
-        "JOBS(JOB_ID primary_key, PRIORITY_TIER categorical)  -- PRIMARY KEY (JOB_ID)"
-    )
+    graph_ddl = "JOBS(JOB_ID primary_key, PRIORITY_TIER categorical)  -- PRIMARY KEY (JOB_ID)"
 
     assert (
         canonicalize_pql_identifiers(
@@ -74,9 +78,7 @@ def test_canonicalize_pql_identifiers_uses_graph_casing() -> None:
 
 def test_resolve_indices_queries_canonical_snowflake_identifier() -> None:
     connector = _Connector()
-    graph_ddl = (
-        "JOBS(JOB_ID primary_key, PRIORITY_TIER categorical)  -- PRIMARY KEY (JOB_ID)"
-    )
+    graph_ddl = "JOBS(JOB_ID primary_key, PRIORITY_TIER categorical)  -- PRIMARY KEY (JOB_ID)"
     pql = canonicalize_pql_identifiers(
         "PREDICT jobs.priority_tier FOR EACH jobs.job_id",
         graph_ddl,
@@ -89,10 +91,7 @@ def test_resolve_indices_queries_canonical_snowflake_identifier() -> None:
         10,
         {"JOBS": '"GPU_FLEET"."JOBS"'},
     ) == ["job-1"]
-    assert connector.sql == (
-        'SELECT DISTINCT "JOB_ID" FROM "GPU_FLEET"."JOBS" '
-        'WHERE "JOB_ID" IS NOT NULL LIMIT 10'
-    )
+    assert connector.sql == ('SELECT DISTINCT "JOB_ID" FROM "GPU_FLEET"."JOBS" WHERE "JOB_ID" IS NOT NULL LIMIT 10')
 
 
 def test_resolve_indices_uses_ids_loaded_into_graph() -> None:
@@ -101,10 +100,43 @@ def test_resolve_indices_uses_ids_loaded_into_graph() -> None:
         None,
         _UnexpectedConnector(),
         2,
-        available_entity_ids={
-            "jobs": ["job-in-graph-1", "job-in-graph-2", "job-in-graph-3"]
-        },
+        available_entity_ids={"jobs": ["job-in-graph-1", "job-in-graph-2", "job-in-graph-3"]},
     ) == ["job-in-graph-1", "job-in-graph-2"]
+
+
+def test_forecast_anchor_inherits_timezone_from_aware_source_column() -> None:
+    anchor = _forecast_anchor(
+        "PREDICT COUNT(events.*, 0, 60, days) > 0 FOR EACH entities.entity_id",
+        _MaxTimestampConnector(pd.Timestamp("2026-12-31T00:00:00Z")),
+        {"events": "recorded_at"},
+        now="2026-08-31",
+    )
+
+    assert anchor == pd.Timestamp("2026-08-31T00:00:00Z")
+    assert anchor.tz is not None
+
+
+def test_forecast_anchor_remains_naive_for_naive_source_column() -> None:
+    anchor = _forecast_anchor(
+        "PREDICT COUNT(events.*, 0, 60, days) > 0 FOR EACH entities.entity_id",
+        _MaxTimestampConnector(pd.Timestamp("2026-12-31")),
+        {"events": "recorded_at"},
+        now="2026-08-31T00:00:00-04:00",
+    )
+
+    assert anchor == pd.Timestamp("2026-08-31")
+    assert anchor.tz is None
+
+
+def test_forecast_anchor_converts_aware_now_to_source_timezone() -> None:
+    anchor = _forecast_anchor(
+        "PREDICT COUNT(events.*, 0, 60, days) > 0 FOR EACH entities.entity_id",
+        _MaxTimestampConnector(pd.Timestamp("2026-12-31T00:00:00Z")),
+        {"events": "recorded_at"},
+        now="2026-08-31T02:00:00+02:00",
+    )
+
+    assert anchor == pd.Timestamp("2026-08-31T00:00:00Z")
 
 
 def test_row_limit_rejection_is_a_context_capacity_error() -> None:
@@ -180,9 +212,7 @@ def test_neighbourhood_memo_is_not_advanced_by_intermittent_gpu_faults() -> None
     assert calls == [None]
 
 
-_QUOTED_PQL = (
-    "PREDICT COUNT(ORDERS.*, 0, 30, days) = 0 FOR EACH `My People`.`Customer ID`"
-)
+_QUOTED_PQL = "PREDICT COUNT(ORDERS.*, 0, 30, days) = 0 FOR EACH `My People`.`Customer ID`"
 
 
 def test_parse_entity_reads_a_quoted_name_as_the_data_spells_it() -> None:
@@ -192,9 +222,10 @@ def test_parse_entity_reads_a_quoted_name_as_the_data_spells_it() -> None:
 
 
 def test_parse_entity_still_reads_a_bare_name() -> None:
-    assert parse_entity(
-        "PREDICT COUNT(ORDERS.*, 0, 30, days) = 0 FOR EACH PEOPLE.CUSTOMER_ID"
-    ) == ("PEOPLE", "CUSTOMER_ID")
+    assert parse_entity("PREDICT COUNT(ORDERS.*, 0, 30, days) = 0 FOR EACH PEOPLE.CUSTOMER_ID") == (
+        "PEOPLE",
+        "CUSTOMER_ID",
+    )
 
 
 def test_canonicalisation_keeps_the_quoting_a_name_needs() -> None:
@@ -209,8 +240,7 @@ def test_static_lint_reads_through_quotes() -> None:
 
     with pytest.raises(pql_gen.PqlStaticError, match="can only filter columns"):
         pql_gen.validate_pql_static(
-            "PREDICT COUNT(ORDERS.* WHERE `My People`.TIER = 'pro', 0, 30, days) "
-            "> 0 FOR EACH `My People`.`Customer ID`"
+            "PREDICT COUNT(ORDERS.* WHERE `My People`.TIER = 'pro', 0, 30, days) > 0 FOR EACH `My People`.`Customer ID`"
         )
 
 

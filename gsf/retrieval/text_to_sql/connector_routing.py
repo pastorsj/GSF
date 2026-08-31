@@ -13,7 +13,7 @@ detection.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from gsf.connectors.base import SQLDatabase
 
@@ -29,26 +29,21 @@ def resolve_target_database_name(
     """
     requested = target_db.strip()
     database_names = [
-        str(database_name)
-        for connector in connectors
-        if (database_name := getattr(connector, "database_name", None))
+        str(database_name) for connector in connectors if (database_name := getattr(connector, "database_name", None))
     ]
 
     if requested in database_names:
         return requested
 
     casefold_matches = [
-        database_name
-        for database_name in database_names
-        if database_name.casefold() == requested.casefold()
+        database_name for database_name in database_names if database_name.casefold() == requested.casefold()
     ]
     if len(casefold_matches) == 1:
         return casefold_matches[0]
 
     available = ", ".join(sorted(database_names)) or "(none)"
     raise ValueError(
-        f"target_db {target_db!r} does not match a configured database name. "
-        f"Available databases: {available}."
+        f"target_db {target_db!r} does not match a configured database name. Available databases: {available}."
     )
 
 
@@ -67,9 +62,7 @@ def resolve_connector_from_tables(
         return None
 
     db_to_connector: dict[str, SQLDatabase] = {
-        str(getattr(c, "database_name", "")): c
-        for c in connectors
-        if getattr(c, "database_name", None)
+        str(getattr(c, "database_name", "")): c for c in connectors if getattr(c, "database_name", None)
     }
 
     table_database_names: set[str] = set()
@@ -92,12 +85,12 @@ def resolve_connector_from_tables(
         )
 
     if table_database_names:
+        if len(table_database_names) != 1:
+            raise ValueError("Relevant tables span multiple databases; federated SQL execution is not supported.")
         database_name = next(iter(table_database_names))
         connector = db_to_connector.get(database_name)
         if connector is None:
-            raise ValueError(
-                f"No configured connector matches database {database_name!r}."
-            )
+            raise ValueError(f"No configured connector matches database {database_name!r}.")
         return connector
 
     if len(connectors) == 1:
