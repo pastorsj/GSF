@@ -11,21 +11,24 @@ semantic nodes alike) and the corresponding rows in both pgvector collections.
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
+from dataclasses import asdict
 from dataclasses import dataclass
 
+from nemo_retriever.tabular_data.ingestion.model.reserved_words import Edges
 from nemo_retriever.tabular_data.ingestion.model.reserved_words import Labels
 from nemo_retriever.tabular_data.neo4j import get_neo4j_conn
 
-from gsf.semantic.constants import (
-    LABEL_ANALYSIS,
-    LABEL_COLUMN_ATTRIBUTE,
-    LABEL_PQL_ANALYSIS,
-    LABEL_SQL_ATTRIBUTE,
-    LABEL_TERM,
-    LABEL_TEXT_ATTRIBUTE,
-)
-from gsf.vdb import get_data_vdb, get_semantic_vdb
+from gsf.semantic.constants import LABEL_ANALYSIS
+from gsf.semantic.constants import LABEL_COLUMN_ATTRIBUTE
+from gsf.semantic.constants import LABEL_PQL_ANALYSIS
+from gsf.semantic.constants import LABEL_SQL_ATTRIBUTE
+from gsf.semantic.constants import LABEL_TERM
+from gsf.semantic.constants import LABEL_TEXT_ATTRIBUTE
+from gsf.vdb import get_data_vdb
+from gsf.vdb import get_semantic_vdb
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,17 @@ class ResetResult:
     """Summary of what a :func:`delete_all_data` call removed."""
 
     database_name: str
+    data_rows: int
+    semantic_rows: int
+
+
+@dataclass
+class RetiredDatabaseResult:
+    """Summary of retiring one exact, already-migrated database alias."""
+
+    database_name: str
+    successor_database_name: str
+    catalog_nodes: int
     data_rows: int
     semantic_rows: int
 
@@ -205,11 +219,110 @@ def delete_all_data(database_name: str | None = None) -> ResetResult:
         semantic_rows=semantic_rows,
     )
     logger.info(
-        "delete_all_data: removed %d pgvector rows for database %s "
-        "(%d data, %d semantic)",
+        "delete_all_data: removed %d pgvector rows for database %s (%d data, %d semantic)",
         result.data_rows + result.semantic_rows,
         database_name,
         result.data_rows,
         result.semantic_rows,
     )
     return result
+
+
+def retire_database_alias(
+    database_name: str,
+    *,
+    successor_database_name: str,
+) -> RetiredDatabaseResult:
+    """Remove one obsolete database alias after its schemas were reparented.
+
+    This migration is intentionally narrower than :func:`delete_all_data`.
+    A replace-model import first resolves the stable schema/table IDs and links
+    them beneath *successor_database_name*.  This function then proves every
+    schema beneath the obsolete database is also owned by that successor,
+    deletes only the obsolete ``Database`` node, and removes vector rows tagged
+    with the obsolete name.  It never traverses into or deletes the migrated
+    catalog subgraph.
+    """
+
+    retired = database_name.strip()
+    successor = successor_database_name.strip()
+    if not retired or not successor:
+        raise ValueError("Retired and successor database names must be nonempty.")
+    if retired.casefold() == successor.casefold():
+        raise ValueError("Retired and successor database names must differ.")
+
+    conn = get_neo4j_conn()
+    existing = conn.query_read(
+        query=f"MATCH (db:{Labels.DB} {{name: $database_name}}) RETURN db.id AS id",
+        parameters={"database_name": retired},
+    )
+    if len(existing) > 1:
+        raise RuntimeError(f"Found multiple catalog databases named {retired!r}.")
+
+    if existing:
+        unshared = conn.query_read(
+            query=f"""
+            MATCH (legacy:{Labels.DB} {{name: $database_name}})
+                  -[:{Edges.CONTAINS}]->(schema:{Labels.SCHEMA})
+            WHERE NOT EXISTS {{
+                MATCH (successor:{Labels.DB} {{name: $successor_database_name}})
+                      -[:{Edges.CONTAINS}]->(schema)
+            }}
+            RETURN coalesce(schema.imported_id, schema.id) AS id,
+                   schema.name AS name
+            """,
+            parameters={
+                "database_name": retired,
+                "successor_database_name": successor,
+            },
+        )
+        if unshared:
+            paths = ", ".join(sorted(str(row.get("name") or row.get("id") or "<unknown>") for row in unshared))
+            raise RuntimeError(f"Cannot retire {retired!r}: schema(s) have not migrated to {successor!r}: {paths}.")
+        conn.query_write(
+            query=f"MATCH (db:{Labels.DB} {{name: $database_name}}) DETACH DELETE db",
+            parameters={"database_name": retired},
+        )
+
+    data_rows = len(get_data_vdb().delete_by_database(retired))
+    semantic_rows = len(get_semantic_vdb().delete_by_database(retired))
+    result = RetiredDatabaseResult(
+        database_name=retired,
+        successor_database_name=successor,
+        catalog_nodes=1 if existing else 0,
+        data_rows=data_rows,
+        semantic_rows=semantic_rows,
+    )
+    logger.info(
+        "retire_database_alias: removed database alias %s after migration to %s "
+        "(%d data embeddings, %d semantic embeddings)",
+        retired,
+        successor,
+        data_rows,
+        semantic_rows,
+    )
+    return result
+
+
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run narrowly scoped GSF catalog maintenance.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    retire = subparsers.add_parser(
+        "retire-database",
+        help="Remove an obsolete database alias after a replace-model import.",
+    )
+    retire.add_argument("--database-name", required=True)
+    retire.add_argument("--successor-database-name", required=True)
+    args = parser.parse_args(argv)
+    if args.command == "retire-database":
+        result = retire_database_alias(
+            args.database_name,
+            successor_database_name=args.successor_database_name,
+        )
+        print(json.dumps(asdict(result), sort_keys=True))
+        return 0
+    raise AssertionError(f"Unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

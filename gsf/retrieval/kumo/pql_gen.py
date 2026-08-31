@@ -77,7 +77,7 @@ def _qualify_from_clauses(sql: str, table_names: dict[str, str] | None) -> str:
     if not table_names:
         return sql
 
-    def repl(match: "re.Match[str]") -> str:
+    def repl(match: re.Match[str]) -> str:
         qualified = table_names.get(match.group(2))
         return f"{match.group(1)} {qualified}" if qualified else match.group(0)
 
@@ -106,9 +106,7 @@ def quote_name(name: str) -> str:
 
 _PREDICT_LINE_START = re.compile(r"(?im)^[ \t]*PREDICT\b")
 _QUALIFIED_IDENTIFIER = re.compile(rf"(?P<table>{_IDENT})\.(?P<column>{_IDENT})")
-_GRAPH_TABLE_LINE = re.compile(
-    rf"(?m)^(?P<table>{_IDENT}|[^(\r\n]+?)\((?P<columns>[^()]*)\)(?:\s+--.*)?$"
-)
+_GRAPH_TABLE_LINE = re.compile(rf"(?m)^(?P<table>{_IDENT}|[^(\r\n]+?)\((?P<columns>[^()]*)\)(?:\s+--.*)?$")
 _FOR_ENTITY = re.compile(
     rf"\bFOR\s+(?P<each>EACH\s+)?(?P<table>{_IDENT})\.(?P<pk>{_IDENT})",
     re.IGNORECASE,
@@ -119,17 +117,13 @@ _CHANGE_INTENT = re.compile(
     r"decline|declines|drop|drops|rise|rises|up|down)\b",
     re.IGNORECASE,
 )
-_CHANGE_COL_MARKER = re.compile(
-    r"(?:^|_)(?:change|delta|qoq|mom|yoy)(?:_|$)", re.IGNORECASE
-)
+_CHANGE_COL_MARKER = re.compile(r"(?:^|_)(?:change|delta|qoq|mom|yoy)(?:_|$)", re.IGNORECASE)
 _WINDOWED_AGG_TARGET = re.compile(
     rf"\b(SUM|AVG|MIN|MAX)\s*\(\s*({_IDENT})\s*\.\s*({_IDENT})"
     r"\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*([A-Za-z]+)\s*\)",
     re.IGNORECASE,
 )
-_METRIC_SUFFIX = re.compile(
-    r"(_usd|_amount|_count|_qty|_rate|_pct|_percent|_value|_total)$", re.IGNORECASE
-)
+_METRIC_SUFFIX = re.compile(r"(_usd|_amount|_count|_qty|_rate|_pct|_percent|_value|_total)$", re.IGNORECASE)
 
 # --- Static PQL lint (catches known-bad shapes BEFORE the backend, with an actionable repair message) ----
 # These shapes pass KumoRFM's cheap parse (validate_pql) yet fail at predict time with opaque backend errors
@@ -262,18 +256,12 @@ def validate_pql_static(
         entity = parse_entity(text)
         if entity is not None:
             entity_table = entity[0].lower()
-            direct = sorted(
-                {src for src, _fk, dst in edges if dst.lower() == entity_table}
-            )
+            direct = sorted({src for src, _fk, dst in edges if dst.lower() == entity_table})
             direct_lower = {t.lower() for t in direct}
             for agg_table, _where in _aggregation_clauses(text):
                 at = agg_table.lower()
                 if at != entity_table and at not in direct_lower:
-                    alts = (
-                        ", ".join(direct)
-                        if direct
-                        else "(none — pick a different entity)"
-                    )
+                    alts = ", ".join(direct) if direct else "(none — pick a different entity)"
                     raise PqlStaticError(
                         f"'{agg_table}' has no direct foreign key to the prediction entity '{entity[0]}', and "
                         f"KumoRFM cannot traverse a multi-hop path inside an aggregation. Aggregate a table that "
@@ -284,9 +272,7 @@ def validate_pql_static(
 
     if col_stypes:
         for tbl, col, op in _REL_COMPARISON.findall(text):
-            stype = col_stypes.get(unquote_name(tbl).lower(), {}).get(
-                unquote_name(col).lower()
-            )
+            stype = col_stypes.get(unquote_name(tbl).lower(), {}).get(unquote_name(col).lower())
             if stype in _NON_ORDINAL_STYPES:
                 raise PqlStaticError(
                     f"'{tbl}.{col}' is a {stype} column and cannot be compared with '{op}'. Compare a "
@@ -300,9 +286,7 @@ class PqlValidatorModel(Protocol):
 
     def validate_pql(self, query: str) -> Any: ...
 
-    def predict(
-        self, query: str, indices: list[Any] | None = None, **kwargs: Any
-    ) -> Any: ...
+    def predict(self, query: str, indices: list[Any] | None = None, **kwargs: Any) -> Any: ...
 
 
 @dataclass
@@ -337,9 +321,7 @@ def _is_forecast(pql: str) -> bool:
     return re.search(r"\bFORECAST\b", pql, re.IGNORECASE) is not None
 
 
-_EXISTENCE_COUNT = re.compile(
-    rf"PREDICT\s+COUNT\s*\(\s*{_IDENT}\s*\.\s*\*", re.IGNORECASE
-)
+_EXISTENCE_COUNT = re.compile(rf"PREDICT\s+COUNT\s*\(\s*{_IDENT}\s*\.\s*\*", re.IGNORECASE)
 
 
 def _is_existence_count_pql(pql: str) -> bool:
@@ -419,9 +401,7 @@ def _prediction_value_column(df: Any, *, id_col: str) -> str:
     scalar (multi-class, link prediction)."""
     import pandas.api.types as pat
 
-    candidates = [
-        c for c in df.columns if c != id_col and c.lower() not in _NON_VALUE_COLS
-    ]
+    candidates = [c for c in df.columns if c != id_col and c.lower() not in _NON_VALUE_COLS]
     lowered = {c.lower(): c for c in candidates}
     for key in ("true_prob", "probability"):
         if key in lowered:
@@ -429,8 +409,7 @@ def _prediction_value_column(df: Any, *, id_col: str) -> str:
     positive = [
         c
         for c in candidates
-        if (c.lower().endswith("_true") or c.lower().endswith("_prob"))
-        and "false" not in c.lower()
+        if (c.lower().endswith("_true") or c.lower().endswith("_prob")) and "false" not in c.lower()
     ]
     if len(positive) == 1:
         return positive[0]
@@ -473,11 +452,7 @@ def aggregate_prediction_by(
         )
     except Exception as exc:  # noqa: BLE001 - turn an opaque warehouse error into an actionable group-by error
         try:
-            valid = list(
-                connector.execute(
-                    f"SELECT * FROM {_sql_table(table, table_names)} LIMIT 1"
-                ).columns
-            )
+            valid = list(connector.execute(f"SELECT * FROM {_sql_table(table, table_names)} LIMIT 1").columns)
         except Exception:  # noqa: BLE001 - best-effort column listing for the message
             valid = []
         raise PqlGroupByError(
@@ -653,9 +628,7 @@ def _retry_at_full_neighbourhood(message: str) -> bool:
     but EXCLUDES the deterministic context-size-limit rejection: retrying the identical query at the same
     neighbourhood just re-hits the same oversize context, so step straight down to a smaller one. Transient
     infra/GPU (CUDA/OOM) and spurious post-validate parse errors are still retried at full to keep accuracy."""
-    return _is_retryable_exec_error(message) and not _is_context_size_limit_error(
-        message
-    )
+    return _is_retryable_exec_error(message) and not _is_context_size_limit_error(message)
 
 
 _REFLECTION_FUNCTION_NAME = "__reflection__"
@@ -729,9 +702,7 @@ def _predict_with_retry(
                 str(exc)[:160],
             )
             if i == 0:
-                _emit_retry_note(
-                    "A prediction attempt failed (transient model or capacity error). Retrying."
-                )
+                _emit_retry_note("A prediction attempt failed (transient model or capacity error). Retrying.")
             time.sleep(backoff * (i + 1))
     raise last_exc  # pragma: no cover - loop always returns or raises
 
@@ -789,7 +760,7 @@ def _predict_resilient(
     predict_fn: Callable[[list[int] | None], Any],
     *,
     device_assert_terminal: bool = True,
-    memo: "_NeighbourhoodMemo | None" = None,
+    memo: _NeighbourhoodMemo | None = None,
 ) -> Any:
     """Run ``predict_fn(num_neighbors)`` accuracy-first.
 
@@ -866,7 +837,7 @@ def _predict_in_batches(
     predict_call: Callable[[list[Any] | None, list[int] | None], Any],
     *,
     device_assert_terminal: bool = True,
-    memo: "_NeighbourhoodMemo | None" = None,
+    memo: _NeighbourhoodMemo | None = None,
 ) -> Any:
     """Run the resilient predict over ``indices`` in ordered chunks of at most ``_PREDICT_BATCH_SIZE``.
 
@@ -1000,11 +971,7 @@ def extract_entity_sql(text: str) -> str | None:
     """Pull the optional entity-selection SQL (a ```sql block that is not the ```pql block)."""
     for match in _GENERIC_FENCE.finditer(text):
         block = match.group(1).strip()
-        if (
-            block
-            and "PREDICT" not in block.upper()
-            and re.match(r"(?is)^\s*(WITH|SELECT)\b", block)
-        ):
+        if block and "PREDICT" not in block.upper() and re.match(r"(?is)^\s*(WITH|SELECT)\b", block):
             return block.rstrip(";").strip()
     return None
 
@@ -1044,14 +1011,10 @@ def _explicit_change_candidate(
                 table_cols = {c.lower(): c for c in cols}
                 break
     if schema_text:
-        table_col_pattern = re.compile(
-            rf"\b{re.escape(table)}\.([A-Za-z_]\w*)\b", re.IGNORECASE
-        )
+        table_col_pattern = re.compile(rf"\b{re.escape(table)}\.([A-Za-z_]\w*)\b", re.IGNORECASE)
         for match in table_col_pattern.finditer(schema_text):
             table_cols.setdefault(match.group(1).lower(), match.group(1))
-        block_pattern = re.compile(
-            rf"\b{re.escape(table)}\b\s*\((.*?)\)", re.IGNORECASE | re.DOTALL
-        )
+        block_pattern = re.compile(rf"\b{re.escape(table)}\b\s*\((.*?)\)", re.IGNORECASE | re.DOTALL)
         for match in block_pattern.finditer(schema_text):
             for name in re.findall(r"\b[A-Za-z_]\w*\b", match.group(1)):
                 if name.upper() not in {
@@ -1069,8 +1032,7 @@ def _explicit_change_candidate(
     candidates = [
         original
         for lowered, original in table_cols.items()
-        if _CHANGE_COL_MARKER.search(lowered)
-        and (lowered.startswith(stem + "_") or stem in lowered.split("_"))
+        if _CHANGE_COL_MARKER.search(lowered) and (lowered.startswith(stem + "_") or stem in lowered.split("_"))
     ]
     if not candidates:
         return None
@@ -1130,11 +1092,7 @@ def _resolve_indices(
     rows may differ from the graph sample.
     """
     entity = parse_entity(pql)
-    available = (
-        available_entity_ids.get(entity[0].casefold())
-        if available_entity_ids and entity
-        else None
-    )
+    available = available_entity_ids.get(entity[0].casefold()) if available_entity_ids and entity else None
     if entity_sql:
         df = connector.execute(_qualify_from_clauses(entity_sql, table_names))
         ids = df.iloc[:, 0].dropna().tolist() if not df.empty else []
@@ -1186,9 +1144,7 @@ def _persist_full_prediction(
         result.prediction_table = table
         result.prediction_table_columns = list(frame.columns)
     except Exception:  # noqa: BLE001 - persistence is an enhancement, never a hard dependency
-        logger.warning(
-            "Failed to persist prediction to scratch table %s", table, exc_info=True
-        )
+        logger.warning("Failed to persist prediction to scratch table %s", table, exc_info=True)
 
 
 _ANCHOR_TABLE_RE = re.compile(
@@ -1242,25 +1198,27 @@ def _forecast_anchor(
     try:
         import pandas as pd
 
-        df = connector.execute(
-            f"SELECT MAX({quote_ident(time_col)}) AS m "
-            f"FROM {_sql_table(anchor_table, table_names)}"
-        )
-        data_max = (
-            pd.Timestamp(df.iloc[0, 0])
-            if (not df.empty and df.iloc[0, 0] is not None)
-            else None
-        )
+        df = connector.execute(f"SELECT MAX({quote_ident(time_col)}) AS m FROM {_sql_table(anchor_table, table_names)}")
+        data_max = pd.Timestamp(df.iloc[0, 0]) if (not df.empty and df.iloc[0, 0] is not None) else None
     except Exception:  # noqa: BLE001 - anchor is best-effort; fall back to the SDK default
         return None
-    if data_max is None:
+    if data_max is None or pd.isna(data_max):
         return None
     safe = data_max - pd.Timedelta(days=horizon_days + 7)
-    now_ts = (
-        pd.Timestamp(now)
-        if now is not None
-        else pd.Timestamp(pd.Timestamp.today().date())
-    )
+    now_ts = pd.Timestamp(now) if now is not None else pd.Timestamp(pd.Timestamp.today().date())
+    # Database connectors legitimately return both timezone-naive timestamps
+    # (for SQL TIMESTAMP) and timezone-aware timestamps (for TIMESTAMPTZ).  The
+    # anchor must use the same convention as the graph's governed time column;
+    # otherwise even choosing ``min(now, safe)`` raises before Kumo receives the
+    # request.  Preserve wall-clock semantics for a naive database and preserve
+    # (or convert to) the source timezone for an aware database.
+    if data_max.tz is None:
+        if now_ts.tz is not None:
+            now_ts = now_ts.tz_localize(None)
+    elif now_ts.tz is None:
+        now_ts = now_ts.tz_localize(data_max.tz)
+    else:
+        now_ts = now_ts.tz_convert(data_max.tz)
     return min(now_ts, safe)
 
 
@@ -1351,12 +1309,7 @@ def _strip_unasked_generic_entity_filter(pql: str, question: str) -> str:
     value_l = match.group("value").lower()
     if column in question_l or value_l in question_l:
         return pql
-    return (
-        pql[: match.start()]
-        + match.group("head")
-        + match.group("tail")
-        + pql[match.end() :]
-    )
+    return pql[: match.start()] + match.group("head") + match.group("tail") + pql[match.end() :]
 
 
 def predict_all(
@@ -1388,9 +1341,7 @@ def predict_all(
             kw["anchor_time"] = anchor
         return kumo_model.predict(pql, indices=idx or None, **kw)
 
-    raw = _predict_in_batches(
-        indices, _predict_call, device_assert_terminal=_is_existence_count_pql(pql)
-    )
+    raw = _predict_in_batches(indices, _predict_call, device_assert_terminal=_is_existence_count_pql(pql))
     return _rank_prediction(raw)
 
 
@@ -1449,11 +1400,7 @@ def generate_pql(
         dialect = None
 
     for attempt in range(1, max_tries + 1):
-        active_llm = (
-            escalation_llm
-            if (escalation_llm is not None and attempt == max_tries)
-            else llm
-        )
+        active_llm = escalation_llm if (escalation_llm is not None and attempt == max_tries) else llm
         prompt = build_pql_prompt(
             graph_ddl=graph_ddl,
             columns=column_reference,
@@ -1480,10 +1427,7 @@ def generate_pql(
             continue
         pql = extract_pql(raw)
         if not pql:
-            prev_error = (
-                "The response did not contain a PQL statement beginning with "
-                "PREDICT on its own line."
-            )
+            prev_error = "The response did not contain a PQL statement beginning with PREDICT on its own line."
             result.error = prev_error
             logger.info(
                 "PQL attempt %d/%d failed: %s",
@@ -1522,13 +1466,9 @@ def generate_pql(
                     available_entity_ids,
                 )
                 if not indices:
-                    raise ValueError(
-                        f"Entity '{explain_entity}' not found in the dataset for this query."
-                    )
+                    raise ValueError(f"Entity '{explain_entity}' not found in the dataset for this query.")
 
-                _anchor = _forecast_anchor(
-                    pql, connector, time_columns, table_names=table_names
-                )
+                _anchor = _forecast_anchor(pql, connector, time_columns, table_names=table_names)
 
                 def _explain_call(num_neighbors: list[int] | None) -> Any:
                     kw: dict[str, Any] = {"explain": True, "run_mode": "fast"}
@@ -1546,8 +1486,7 @@ def generate_pql(
                 prediction = getattr(expl, "prediction", None)
                 if prediction is not None and hasattr(prediction, "columns"):
                     if _anchor is not None and not any(
-                        str(column).casefold() == "anchor_timestamp"
-                        for column in prediction.columns
+                        str(column).casefold() == "anchor_timestamp" for column in prediction.columns
                     ):
                         prediction = prediction.copy()
                         prediction["ANCHOR_TIMESTAMP"] = _anchor
@@ -1565,11 +1504,7 @@ def generate_pql(
             else:
                 forecast = _is_forecast(pql)
                 whole_population = group_by or bool(persist_table)
-                entity_cap = (
-                    max(max_entities, _GROUP_BY_MAX_ENTITIES)
-                    if whole_population
-                    else max_entities
-                )
+                entity_cap = max(max_entities, _GROUP_BY_MAX_ENTITIES) if whole_population else max_entities
                 scope_sql = entity_sql
                 if group_by and entity_sql:
                     scope_sql = None
@@ -1605,13 +1540,9 @@ def generate_pql(
                         )
                     indices = indices[:1]
 
-                _anchor = _forecast_anchor(
-                    pql, connector, time_columns, table_names=table_names
-                )
+                _anchor = _forecast_anchor(pql, connector, time_columns, table_names=table_names)
 
-                def _predict_call(
-                    idx: list[Any] | None, num_neighbors: list[int] | None
-                ) -> Any:
+                def _predict_call(idx: list[Any] | None, num_neighbors: list[int] | None) -> Any:
                     kw: dict[str, Any] = {}
                     if num_neighbors is not None:
                         kw["num_neighbors"] = num_neighbors
@@ -1633,9 +1564,7 @@ def generate_pql(
                         )
                     entity = parse_entity(pql)
                     if entity is None:
-                        raise PqlGroupByError(
-                            "Could not determine the prediction entity to group from the PQL."
-                        )
+                        raise PqlGroupByError("Could not determine the prediction entity to group from the PQL.")
                     grouped = aggregate_prediction_by(
                         raw,
                         table=entity[0],
@@ -1650,19 +1579,12 @@ def generate_pql(
                     result.columns = list(grouped.columns)
                     result.rows = grouped.to_dict("records")
                 else:
-                    prediction = (
-                        _order_forecast(raw) if forecast else _rank_prediction(raw)
-                    )
+                    prediction = _order_forecast(raw) if forecast else _rank_prediction(raw)
                     result.num_entities = len(indices)
                     result.truncated = not forecast and len(indices) >= entity_cap
                     result.columns = list(prediction.columns)
                     result.rows = prediction.head(max_preview_rows).to_dict("records")
-                    if (
-                        persist_table
-                        and mirror_path
-                        and persist_lock is not None
-                        and not forecast
-                    ):
+                    if persist_table and mirror_path and persist_lock is not None and not forecast:
                         _persist_full_prediction(
                             prediction,
                             pql=pql,
@@ -1684,9 +1606,7 @@ def generate_pql(
         except Exception as exc:  # noqa: BLE001 - error feeds the repair loop
             prev_pql, prev_error = pql, str(exc)
             result.error = prev_error
-            logger.info(
-                "PQL attempt %d/%d failed: %s", attempt, max_tries, prev_error[:160]
-            )
+            logger.info("PQL attempt %d/%d failed: %s", attempt, max_tries, prev_error[:160])
             if _is_unsupported_shape_error(prev_error):
                 if _is_existence_count_pql(pql):
                     result.error = _friendly_unsupported_message(pql, prev_error)
@@ -1701,15 +1621,11 @@ def generate_pql(
             # the PQL cannot help (the data/graph is what's too big), so stop and report rather than burn
             # the remaining attempts re-hitting the same server limit.
             if _is_context_capacity_error(prev_error):
-                logger.info(
-                    "Persistent context/GPU-capacity error on a valid query; not regenerating."
-                )
+                logger.info("Persistent context/GPU-capacity error on a valid query; not regenerating.")
                 break
             if _is_empty_context_error(prev_error):
                 result.error = _friendly_empty_context_message()
-                logger.info(
-                    "Empty entity set (no context examples) on a valid query; not regenerating."
-                )
+                logger.info("Empty entity set (no context examples) on a valid query; not regenerating.")
                 break
             # The query passed both validators and the backend still failed (e.g. the NIM
             # answering /v1/predictions with a bare HTTP 500). That is infrastructure, not the

@@ -8,52 +8,58 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+from unittest.mock import call
+from unittest.mock import patch
 
 import pytest
 import yaml
-from ossie_gsf import GSFConversionError, convert_gsf_to_ossie
-
-from gsf.dal.model_interchange import (
-    _EXPORT_CATALOG_QUERY,
-    _EXPORT_CUSTOM_ANALYSES_QUERY,
-    _EXPORT_FKS_QUERY,
-    _EXPORT_JOINS_QUERY,
-    _EXPORT_SEMANTIC_FKS_QUERY,
-    _EXPORT_SQL_ATTRIBUTES_QUERY,
-    _EXPORT_TERMS_QUERY,
-    UnknownDatabaseIdsError,
-    _changed_entity_ids,
-    _resolve_entity,
-    _resolve_entities_batch,
-    assemble_export_document,
-    resolve_sql_column_ids,
-    validate_database_ids,
-)
-from gsf.semantic.constants import (
-    SQL_ATTR_SOURCE_BRIDGE,
-    SQL_ATTR_SOURCE_MANUAL,
-    SQL_ATTR_SOURCE_SQL,
-    SQL_ATTR_SOURCE_TABLE,
-)
+from gsf.dal.model_interchange import _EXPORT_CATALOG_QUERY
+from gsf.dal.model_interchange import _EXPORT_CUSTOM_ANALYSES_QUERY
+from gsf.dal.model_interchange import _EXPORT_FKS_QUERY
+from gsf.dal.model_interchange import _EXPORT_JOINS_QUERY
+from gsf.dal.model_interchange import _EXPORT_SEMANTIC_FKS_QUERY
+from gsf.dal.model_interchange import _EXPORT_SQL_ATTRIBUTES_QUERY
+from gsf.dal.model_interchange import _EXPORT_TERMS_QUERY
+from gsf.dal.model_interchange import UnknownDatabaseIdsError
+from gsf.dal.model_interchange import _changed_entity_ids
+from gsf.dal.model_interchange import _import_catalog
+from gsf.dal.model_interchange import _resolve_entities_batch
+from gsf.dal.model_interchange import _resolve_entity
+from gsf.dal.model_interchange import assemble_export_document
+from gsf.dal.model_interchange import resolve_sql_column_ids
+from gsf.dal.model_interchange import validate_database_ids
+from gsf.semantic.constants import SQL_ATTR_SOURCE_BRIDGE
+from gsf.semantic.constants import SQL_ATTR_SOURCE_MANUAL
+from gsf.semantic.constants import SQL_ATTR_SOURCE_SQL
+from gsf.semantic.constants import SQL_ATTR_SOURCE_TABLE
 from gsf.server.model_interchange import service
-from gsf.server.model_interchange.embed import (
-    ImportEmbedBuffer,
-    build_column_data_row,
-    build_table_data_row,
-    flush_import_embeddings,
-)
-from gsf.server.model_interchange.schemas import (
-    ExportRequest,
-    GsfModelDocument,
-    ModelFormat,
-)
+from gsf.server.model_interchange.embed import ImportEmbedBuffer
+from gsf.server.model_interchange.embed import build_column_data_row
+from gsf.server.model_interchange.embed import build_table_data_row
+from gsf.server.model_interchange.embed import flush_import_embeddings
+from gsf.server.model_interchange.schemas import ExportRequest
+from gsf.server.model_interchange.schemas import GsfModelDocument
+from gsf.server.model_interchange.schemas import ModelFormat
+from ossie_gsf import GSFConversionError
+from ossie_gsf import convert_gsf_to_ossie
 
 
 @contextmanager
 def _null_transaction():
     """Stand in for ``write_transaction`` so unit tests need no live Neo4j."""
     yield
+
+
+@pytest.fixture(autouse=True)
+def _stable_export_dialects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep unit exports independent of configured connectors and live Neo4j."""
+
+    monkeypatch.setattr(
+        service,
+        "_dialect_by_database_name",
+        lambda: {"retail": "sqlite", "inventory": "sqlite"},
+    )
 
 
 def _catalog_rows(*, db_id: str = "db-1", db_name: str = "retail") -> list[dict]:
@@ -266,14 +272,10 @@ def test_export_yaml_round_trips_through_safe_load() -> None:
     loaded = yaml.safe_load(yaml_text)
     round_tripped = GsfModelDocument.model_validate(loaded)
     assert round_tripped.data_layer.databases[0].id == "db-1"
-    assert (
-        round_tripped.semantic_layer.terms[0].columns_attributes[0].column_id == "col-1"
-    )
+    assert round_tripped.semantic_layer.terms[0].columns_attributes[0].column_id == "col-1"
 
 
-@patch(
-    "gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[]
-)
+@patch("gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[])
 @patch("gsf.server.model_interchange.service.dal.fetch_export_rows")
 @patch("gsf.server.model_interchange.service.dal.validate_database_ids")
 def test_export_model_filters_by_database_id(
@@ -289,15 +291,10 @@ def test_export_model_filters_by_database_id(
     mock_validate.assert_called_once_with(["db-2"])
     mock_fetch.assert_called_once_with(["db-2"])
     assert payload["data_layer"]["databases"][0]["id"] == "db-2"
-    assert (
-        payload["data_layer"]["databases"][0]["schemas"][0]["database_name"]
-        == "inventory"
-    )
+    assert payload["data_layer"]["databases"][0]["schemas"][0]["database_name"] == "inventory"
 
 
-@patch(
-    "gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[]
-)
+@patch("gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[])
 @patch("gsf.server.model_interchange.service.dal.fetch_export_rows")
 @patch("gsf.server.model_interchange.service.dal.validate_database_ids")
 def test_export_model_all_databases_uses_empty_filter(
@@ -313,9 +310,7 @@ def test_export_model_all_databases_uses_empty_filter(
     mock_fetch.assert_called_once_with([])
 
 
-@patch(
-    "gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[]
-)
+@patch("gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[])
 @patch("gsf.server.model_interchange.service.dal.fetch_export_rows")
 @patch("gsf.server.model_interchange.service.dal.validate_database_ids")
 def test_export_model_ossie_format_emits_ossie_document(
@@ -336,9 +331,7 @@ def test_export_model_ossie_format_emits_ossie_document(
     assert model["datasets"][0]["source"] == "retail.main.orders"
 
 
-@patch(
-    "gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[]
-)
+@patch("gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[])
 @patch("gsf.server.model_interchange.service.dal.fetch_export_rows")
 @patch("gsf.server.model_interchange.service.dal.validate_database_ids")
 def test_export_model_ossie_reports_all_duplicate_custom_analysis_names(
@@ -439,9 +432,7 @@ def _multi_table_term_rows() -> dict:
     return rows
 
 
-@patch(
-    "gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[]
-)
+@patch("gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[])
 @patch("gsf.server.model_interchange.service.dal.fetch_export_rows")
 @patch("gsf.server.model_interchange.service.dal.validate_database_ids")
 def test_export_model_ossie_keeps_one_table_per_term(
@@ -470,9 +461,7 @@ def test_export_model_ossie_keeps_one_table_per_term(
     ]
 
 
-@patch(
-    "gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[]
-)
+@patch("gsf.server.model_interchange.service.dal.resolve_sql_column_ids", return_value=[])
 @patch("gsf.server.model_interchange.service.dal.fetch_export_rows")
 @patch("gsf.server.model_interchange.service.dal.validate_database_ids")
 def test_export_model_gsf_keeps_every_represented_table(
@@ -733,6 +722,99 @@ def test_resolve_entities_batch_migrates_database_by_name(
             "replace_imported_id": True,
         }
     ]
+
+
+@patch("gsf.dal.model_interchange._update_entity_properties")
+@patch("gsf.dal.model_interchange._changed_entity_ids")
+def test_replace_restores_resolved_table_properties(
+    mock_changed: MagicMock,
+    mock_update: MagicMock,
+) -> None:
+    """Stable imported ids identify tables but do not preserve stale local props."""
+    from gsf.dal.model_interchange import _restore_resolved_entity_properties
+
+    items = [
+        (
+            "yaml-table",
+            {
+                "name": "deployments",
+                "description": "reviewed",
+                "pk": ["deployment_id"],
+                "table_type": "BASE TABLE",
+            },
+        )
+    ]
+    results = {"yaml-table": ("live-table", False)}
+    mock_changed.return_value = {"live-table"}
+
+    _restore_resolved_entity_properties("Table", items, results)
+
+    expected = {
+        "live-table": {
+            "name": "deployments",
+            "description": "reviewed",
+            "pk": ["deployment_id"],
+            "table_type": "BASE TABLE",
+        }
+    }
+    mock_changed.assert_called_once_with("Table", expected)
+    mock_update.assert_called_once_with("Table", expected, {"live-table"})
+
+
+@patch("gsf.dal.model_interchange._restore_resolved_entity_properties")
+@patch("gsf.dal.model_interchange._resolve_entities_batch")
+@patch("gsf.dal.model_interchange.graph")
+def test_replace_restores_database_and_schema_properties_before_reparenting(
+    mock_graph: MagicMock,
+    mock_resolve: MagicMock,
+    mock_restore: MagicMock,
+) -> None:
+    """Stable IDs migrate a reviewed schema instead of retaining its old name."""
+
+    document = assemble_export_document(
+        _export_rows(db_id="db-reviewed", db_name="ai_factory"),
+        dialect_by_db_name={"ai_factory": "duckdb"},
+        sql_column_resolver=lambda _sql, _db: [],
+    )
+    schema = document.data_layer.databases[0].schemas[0]
+    schema.name = "prediction"
+    mock_resolve.side_effect = [
+        {"db-reviewed": ("live-db", False)},
+        {"sch-1": ("live-schema", False)},
+        {"tbl-1": ("live-table", False)},
+        {"col-1": ("live-column", False)},
+    ]
+    created = {
+        "databases": 0,
+        "schemas": 0,
+        "tables": 0,
+        "columns": 0,
+    }
+    skipped = dict(created)
+
+    _import_catalog(
+        document,
+        {},
+        created,
+        skipped,
+        None,
+        {},
+        replace=True,
+    )
+
+    assert mock_restore.call_args_list[:2] == [
+        call(
+            "Database",
+            [("db-reviewed", {"name": "ai_factory"})],
+            {"db-reviewed": ("live-db", False)},
+        ),
+        call(
+            "Schema",
+            [("sch-1", {"name": "prediction"})],
+            {"sch-1": ("live-schema", False)},
+        ),
+    ]
+    assert mock_graph.return_value.query_write.call_count >= 3
 
 
 @patch("gsf.dal.model_interchange._database_names_for_columns")

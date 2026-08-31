@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+from typing import Any
 
 from nemo_retriever.tabular_data.neo4j import get_neo4j_conn
 
@@ -53,21 +54,23 @@ class PqlAnalysisPqlConflict(Exception):
 # ---------------------------------------------------------------------------
 
 
-def list_pql_analyses() -> list[dict[str, Any]]:
-    """Return all ``PqlAnalysis`` nodes as ``{id, name, description, pql}``."""
+def list_pql_analyses(database_name: str | None = None) -> list[dict[str, Any]]:
+    """Return PQL examples, optionally restricted to one catalog database."""
     rows = get_neo4j_conn().query_read(
         f"""
         MATCH (pa:{_LABEL})
+        WHERE $database_name IS NULL OR pa.database_name = $database_name
         WITH pa
-        ORDER BY pa.name
+        ORDER BY pa.database_name, pa.name
         RETURN collect({{
             id: pa.id,
+            database_name: pa.database_name,
             name: pa.name,
             description: pa.description,
             pql: pa.pql
         }}) AS analyses
         """,
-        {},
+        {"database_name": database_name},
     )
     return rows[0]["analyses"] if rows else []
 
@@ -75,15 +78,16 @@ def list_pql_analyses() -> list[dict[str, Any]]:
 def find_pql_analysis_by_name(
     name: str,
     exclude_id: str | None,
+    database_name: str,
 ) -> dict[str, str] | None:
     rows = get_neo4j_conn().query_read(
         f"""
-        MATCH (other:{_LABEL} {{name: $name}})
+        MATCH (other:{_LABEL} {{name: $name, database_name: $database_name}})
         WHERE $exclude_id IS NULL OR other.id <> $exclude_id
         RETURN other.id AS id, other.name AS name
         LIMIT 1
         """,
-        {"name": name, "exclude_id": exclude_id},
+        {"name": name, "exclude_id": exclude_id, "database_name": database_name},
     )
     if not rows:
         return None
@@ -93,45 +97,58 @@ def find_pql_analysis_by_name(
 def find_pql_analysis_by_pql(
     pql: str,
     exclude_id: str | None,
+    database_name: str,
 ) -> dict[str, str] | None:
     rows = get_neo4j_conn().query_read(
         f"""
-        MATCH (other:{_LABEL} {{pql: $pql}})
+        MATCH (other:{_LABEL} {{pql: $pql, database_name: $database_name}})
         WHERE $exclude_id IS NULL OR other.id <> $exclude_id
         RETURN other.id AS id, other.name AS name
         LIMIT 1
         """,
-        {"pql": pql, "exclude_id": exclude_id},
+        {"pql": pql, "exclude_id": exclude_id, "database_name": database_name},
     )
     if not rows:
         return None
     return {"id": rows[0]["id"], "name": rows[0]["name"]}
 
 
-def get_pql_analysis_by_id(analysis_id: str) -> str | None:
+def get_pql_analysis_by_id(
+    analysis_id: str,
+    database_name: str | None = None,
+) -> str | None:
     """Return the id of the PqlAnalysis, or None if it doesn't exist."""
     rows = get_neo4j_conn().query_read(
         f"""
         MATCH (pa:{_LABEL} {{id: $analysis_id}})
+        WHERE $database_name IS NULL
+           OR pa.database_name IS NULL
+           OR pa.database_name = $database_name
         RETURN pa.id AS id
         LIMIT 1
         """,
-        {"analysis_id": analysis_id},
+        {"analysis_id": analysis_id, "database_name": database_name},
     )
     return rows[0]["id"] if rows else None
 
 
-def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, str]]:
-    """Fetch ``{id: {id, name, description, pql}}`` for the given PqlAnalysis ids."""
+def fetch_pql_analyses_by_ids(
+    analysis_ids: list[str],
+    *,
+    database_name: str,
+) -> dict[str, dict[str, str]]:
+    """Fetch IDs only when they belong to *database_name*."""
     if not analysis_ids:
         return {}
     query = f"""
     UNWIND $ids AS analysis_id
     MATCH (pa:{_LABEL} {{id: analysis_id}})
-    RETURN pa.id AS id, pa.name AS name, pa.description AS description, pa.pql AS pql
+    WHERE pa.database_name = $database_name
+    RETURN pa.id AS id, pa.database_name AS database_name, pa.name AS name,
+           pa.description AS description, pa.pql AS pql
     """
     try:
-        rows = get_neo4j_conn().query_read(query, {"ids": analysis_ids})
+        rows = get_neo4j_conn().query_read(query, {"ids": analysis_ids, "database_name": database_name})
     except Exception:
         logger.warning("fetch_pql_analyses_by_ids: Neo4j query failed", exc_info=True)
         return {}
@@ -143,6 +160,7 @@ def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, st
             continue
         out[pid] = {
             "id": pid,
+            "database_name": (row.get("database_name") or "").strip(),
             "name": (row.get("name") or "").strip(),
             "description": (row.get("description") or "").strip(),
             "pql": (row.get("pql") or "").strip(),
@@ -157,18 +175,23 @@ def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, st
 
 def upsert_pql_analysis_node(
     analysis_id: str,
+    database_name: str,
     name: str,
     description: str,
     pql: str,
 ) -> None:
-    """MERGE a ``PqlAnalysis`` node by id, setting name/description/pql."""
+    """MERGE a scoped ``PqlAnalysis`` node by id."""
     get_neo4j_conn().query_write(
         f"""
         MERGE (pa:{_LABEL} {{id: $analysis_id}})
-        SET pa.name = $name, pa.description = $description, pa.pql = $pql
+        SET pa.database_name = $database_name,
+            pa.name = $name,
+            pa.description = $description,
+            pa.pql = $pql
         """,
         {
             "analysis_id": analysis_id,
+            "database_name": database_name,
             "name": name,
             "description": description,
             "pql": pql,
@@ -193,10 +216,9 @@ def delete_pql_analysis_node(analysis_id: str) -> None:
 
 
 def embed_pql_analyses(
-    embed_params: "EmbedParams",
-    vdb: "VDB",
+    embed_params: EmbedParams,
+    vdb: VDB,
     analysis_id: str | None = None,
-    database_name: str | None = None,
 ) -> None:
     """Fetch ``PqlAnalysis`` docs from Neo4j, embed them, and append to *vdb*."""
     import pandas as pd
@@ -219,7 +241,8 @@ def embed_pql_analyses(
             text: pa.name +
                   CASE WHEN desc <> '' THEN ': ' + desc ELSE '' END,
             name: pa.name,
-            id: pa.id
+            id: pa.id,
+            database_name: pa.database_name
         }}) AS docs
     """
     result = get_neo4j_conn().query_read(query, parameters={"analysis_id": analysis_id})
@@ -240,7 +263,7 @@ def embed_pql_analyses(
             "label": _LABEL,
             "name": item.get("name", ""),
             "source_path": path,
-            "database_name": database_name,
+            "database_name": item.get("database_name"),
         }
         rows.append(
             {
@@ -266,9 +289,7 @@ def embed_pql_analyses(
     )
 
     with_embeddings = [
-        row
-        for row in embedded.to_dict(orient="records")
-        if (row.get("metadata") or {}).get("embedding")
+        row for row in embedded.to_dict(orient="records") if (row.get("metadata") or {}).get("embedding")
     ]
     if not with_embeddings:
         raise RuntimeError(

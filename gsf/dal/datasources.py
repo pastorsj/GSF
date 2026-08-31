@@ -21,25 +21,23 @@ import logging
 from typing import Any
 
 import pandas as pd
-from nemo_retriever.tabular_data.ingestion.model.reserved_words import Edges, Labels
+from nemo_retriever.tabular_data.ingestion.model.reserved_words import Edges
+from nemo_retriever.tabular_data.ingestion.model.reserved_words import Labels
 
-from gsf.dal.cypher_fragments import (
-    column_description_expr,
-    paging_clause,
-    table_description_expr,
-)
+from gsf.dal.cypher_fragments import column_description_expr
+from gsf.dal.cypher_fragments import paging_clause
+from gsf.dal.cypher_fragments import table_description_expr
 from gsf.dal.neo4j_tx import graph
-from gsf.dal.users import resolve_accessible_catalog_ids, resolve_table_filter
-from gsf.semantic.constants import (
-    LABEL_COLUMN_ATTRIBUTE,
-    LABEL_SQL_ATTRIBUTE,
-    LABEL_TERM,
-    REL_HAS_ATTRIBUTE,
-    REL_PROPERTY_OF,
-    REL_REPRESENTS,
-    REL_SEMANTIC_FK,
-    SQL_ATTR_SOURCE_BRIDGE,
-)
+from gsf.dal.users import resolve_accessible_catalog_ids
+from gsf.dal.users import resolve_table_filter
+from gsf.semantic.constants import LABEL_COLUMN_ATTRIBUTE
+from gsf.semantic.constants import LABEL_SQL_ATTRIBUTE
+from gsf.semantic.constants import LABEL_TERM
+from gsf.semantic.constants import REL_HAS_ATTRIBUTE
+from gsf.semantic.constants import REL_PROPERTY_OF
+from gsf.semantic.constants import REL_REPRESENTS
+from gsf.semantic.constants import REL_SEMANTIC_FK
+from gsf.semantic.constants import SQL_ATTR_SOURCE_BRIDGE
 from gsf.utils.join_columns import parse_join_columns
 from gsf.utils.sample_values import parse_sample_values
 
@@ -234,14 +232,19 @@ RETURN t.id AS id,
 """
 
 _FETCH_TABLE_BY_NAME = f"""
-MATCH (t:{Labels.TABLE} {{name: $name}})
-MATCH (s:{Labels.SCHEMA})-[:{Edges.CONTAINS}]->(t)
+MATCH (db:{Labels.DB})-[:{Edges.CONTAINS}]->(s:{Labels.SCHEMA})
+      -[:{Edges.CONTAINS}]->(t:{Labels.TABLE} {{name: $name}})
+WHERE ($database_name IS NULL OR db.name = $database_name)
+  AND ($schema_name IS NULL OR s.name = $schema_name)
 RETURN t.id AS id,
        t.name AS name,
+       db.name AS database_name,
        s.name AS schema_name,
+       t.table_type AS table_type,
        t.description AS description,
        t.pk as pk
-LIMIT 1
+ORDER BY db.name, s.name, t.id
+LIMIT 2
 """
 
 _FETCH_JOIN_NEIGHBORS = f"""
@@ -326,8 +329,7 @@ WITH db, s, t, columns_count, sql_count,
 def fetch_tables_for_schema(
     schema_id: str,
     *,
-    database_name: str
-    | None = None,  # accepted for API compat; schema_id is globally unique
+    database_name: str | None = None,  # accepted for API compat; schema_id is globally unique
     zone_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return Table payloads with column, SQL, and Term counts for a schema.
@@ -335,9 +337,7 @@ def fetch_tables_for_schema(
     When *zone_ids* is supplied only tables reachable through those zones are
     returned.
     """
-    where_clause, params = resolve_table_filter(
-        zone_ids, "t.id", extra_params={"schema_id": schema_id}
-    )
+    where_clause, params = resolve_table_filter(zone_ids, "t.id", extra_params={"schema_id": schema_id})
 
     return graph().query_read(
         f"""
@@ -384,10 +384,39 @@ def fetch_table_by_id(table_id: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
-def fetch_table_by_name(name: str) -> dict[str, Any] | None:
-    """Return the first Table row matching *name*, or None if not found."""
-    rows = graph().query_read(_FETCH_TABLE_BY_NAME, {"name": name})
-    return rows[0] if rows else None
+def fetch_table_by_name(
+    name: str,
+    *,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Return one table resolved by name and optional catalog scope.
+
+    Legacy unscoped callers retain deterministic first-match behavior. Scoped
+    callers fail closed (``None``) when the supplied database/schema still matches
+    more than one table, so prediction cannot silently bind an example or contract
+    to a same-named table in another catalog path.
+    """
+
+    rows = graph().query_read(
+        _FETCH_TABLE_BY_NAME,
+        {
+            "name": name,
+            "database_name": database_name,
+            "schema_name": schema_name,
+        },
+    )
+    if not rows:
+        return None
+    if (database_name is not None or schema_name is not None) and len(rows) != 1:
+        logger.warning(
+            "fetch_table_by_name: scoped table %s.%s.%s is ambiguous",
+            database_name or "*",
+            schema_name or "*",
+            name,
+        )
+        return None
+    return rows[0]
 
 
 def fetch_tables_by_ids(table_ids: list[str]) -> list[dict[str, Any]]:
@@ -649,10 +678,7 @@ def store_column_sample_values(table_id: str, samples: dict[str, list]) -> None:
     """
     if not samples:
         return
-    entries = [
-        {"column_name": col, "sample_values": json.dumps(vals)}
-        for col, vals in samples.items()
-    ]
+    entries = [{"column_name": col, "sample_values": json.dumps(vals)} for col, vals in samples.items()]
     graph().query_write(
         f"""
         MATCH (t:{Labels.TABLE} {{id: $table_id}})-[:{Edges.CONTAINS}]->(col:{Labels.COLUMN})
@@ -674,10 +700,7 @@ def store_column_uniqueness(table_id: str, uniqueness: dict[str, bool]) -> None:
     """
     if not uniqueness:
         return
-    entries = [
-        {"column_name": col, "is_unique": bool(is_unique)}
-        for col, is_unique in uniqueness.items()
-    ]
+    entries = [{"column_name": col, "is_unique": bool(is_unique)} for col, is_unique in uniqueness.items()]
     graph().query_write(
         f"""
         MATCH (t:{Labels.TABLE} {{id: $table_id}})-[:{Edges.CONTAINS}]->(col:{Labels.COLUMN})
@@ -811,9 +834,7 @@ def fetch_node_properties_by_id(id: str, label: str | list[str]) -> dict | None:
     labels_list = label if isinstance(label, list) else [label]
     for lbl in labels_list:
         if lbl not in _ALLOWED_NODE_LABELS:
-            logger.warning(
-                "Rejecting unknown label %r in fetch_node_properties_by_id", lbl
-            )
+            logger.warning("Rejecting unknown label %r in fetch_node_properties_by_id", lbl)
             return None
     label_filter = "|".join(labels_list)
     props = graph().query_read(

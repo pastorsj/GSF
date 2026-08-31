@@ -24,14 +24,13 @@ Example
 
 from __future__ import annotations
 
-
 import logging
 from datetime import datetime
 from pathlib import Path
+
 import duckdb
 import pandas as pd
-from typing import Optional
-
+from nemo_retriever.tabular_data.ingestion.model.reserved_words import TableTypes
 from nemo_retriever.tabular_data.sql_database import SQLDatabase
 
 logger = logging.getLogger(__name__)
@@ -75,7 +74,7 @@ class DuckDBDatabase(SQLDatabase):
     # Execution
     # ------------------------------------------------------------------
 
-    def execute(self, sql: str, parameters: Optional[list] = None) -> pd.DataFrame:
+    def execute(self, sql: str, parameters: list | None = None) -> pd.DataFrame:
         """Execute a SQL statement and return a pandas DataFrame.
 
         Parameters
@@ -97,13 +96,20 @@ class DuckDBDatabase(SQLDatabase):
     # ------------------------------------------------------------------
 
     def get_tables(self) -> pd.DataFrame:
-        """Return all tables from information_schema as a DataFrame."""
+        """Return base tables and views with their normalized catalog type."""
+        base_table_type = TableTypes.BASE_TABLE
+        view_type = TableTypes.VIEW
         return self.execute(
-            """
+            f"""
             SELECT
                 table_schema,
-                table_name
+                table_name,
+                CASE table_type
+                    WHEN 'VIEW' THEN '{view_type}'
+                    ELSE '{base_table_type}'
+                END AS table_type
             FROM information_schema.tables
+            WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
             ORDER BY table_schema, table_name
         """
         )
@@ -126,12 +132,7 @@ class DuckDBDatabase(SQLDatabase):
 
     def get_queries(self) -> pd.DataFrame:
         """DuckDB has no built-in query history — loads sample queries from a CSV."""
-        csv_path = (
-            Path(__file__).parent
-            / "benchmarks"
-            / self._database_name
-            / "sample_queries.csv"
-        )
+        csv_path = Path(__file__).parent / "benchmarks" / self._database_name / "sample_queries.csv"
         if not csv_path.exists():
             logger.warning(
                 "No sample queries CSV found at %s; returning empty DataFrame.",
@@ -156,10 +157,121 @@ class DuckDBDatabase(SQLDatabase):
         )
 
     def get_pks(self) -> pd.DataFrame:
-        return pd.DataFrame()
+        """Return physical keys plus reviewed keys for governed DuckDB views.
+
+        DuckDB views cannot declare physical primary-key constraints.  A Kumo
+        graph contract supplies the reviewed identity for the exact governed
+        views it owns.  Including those keys in the connector metadata lets
+        the standard NeMo tabular ingest reset and repopulate *all* table PKs:
+        physical-table keys still come from DuckDB, while view keys come only
+        from the deployment-owned contract.
+        """
+        physical = self.execute(
+            """
+            SELECT
+                constraints.schema_name AS table_schema,
+                constraints.table_name,
+                key_column.column_name,
+                key_column.ordinal_position
+            FROM duckdb_constraints() AS constraints,
+                 UNNEST(constraints.constraint_column_names) WITH ORDINALITY
+                    AS key_column(column_name, ordinal_position)
+            WHERE constraints.constraint_type = 'PRIMARY KEY'
+            ORDER BY constraints.schema_name,
+                     constraints.table_name,
+                     key_column.ordinal_position
+            """
+        )
+        governed = self._get_governed_view_pks()
+        if governed.empty:
+            return physical
+        return (
+            pd.concat([physical, governed], ignore_index=True)
+            .drop_duplicates(
+                subset=["table_schema", "table_name", "column_name"],
+                keep="first",
+            )
+            .sort_values(
+                ["table_schema", "table_name", "ordinal_position"],
+                ignore_index=True,
+            )
+        )
+
+    def _get_governed_view_pks(self) -> pd.DataFrame:
+        """Materialize contract-owned view identities as ingestion PK rows."""
+
+        from gsf.retrieval.kumo.graph_contract import GraphContractError
+        from gsf.retrieval.kumo.graph_contract import load_graph_contracts
+
+        fields = ["table_schema", "table_name", "column_name", "ordinal_position"]
+        contract = next(
+            (item for item in load_graph_contracts() if item.database_name.casefold() == self.database_name.casefold()),
+            None,
+        )
+        if contract is None:
+            return pd.DataFrame(columns=fields)
+
+        tables = {
+            (str(row.table_schema).casefold(), str(row.table_name).casefold()): str(row.table_type)
+            for row in self.get_tables().itertuples(index=False)
+        }
+        columns = {
+            (
+                str(row.table_schema).casefold(),
+                str(row.table_name).casefold(),
+                str(row.column_name).casefold(),
+            )
+            for row in self.get_columns().itertuples(index=False)
+        }
+        rows: list[dict[str, object]] = []
+        for table in contract.tables:
+            path = (table.schema_name.casefold(), table.name.casefold())
+            if tables.get(path, "").casefold() != TableTypes.VIEW.casefold():
+                raise GraphContractError(
+                    "governed DuckDB object "
+                    f"{contract.database_name}.{table.schema_name}.{table.name} "
+                    "must exist as a VIEW before ingestion"
+                )
+            for ordinal, column_name in enumerate(table.primary_key, start=1):
+                if (*path, column_name.casefold()) not in columns:
+                    raise GraphContractError(
+                        "governed DuckDB view "
+                        f"{contract.database_name}.{table.schema_name}.{table.name} "
+                        f"has no primary-key column {column_name!r}"
+                    )
+                rows.append(
+                    {
+                        "table_schema": table.schema_name,
+                        "table_name": table.name,
+                        "column_name": column_name,
+                        "ordinal_position": ordinal,
+                    }
+                )
+        return pd.DataFrame(rows, columns=fields)
 
     def get_fks(self) -> pd.DataFrame:
-        return pd.DataFrame()
+        """Return foreign-key column pairs, including composite relationships."""
+        return self.execute(
+            """
+            SELECT
+                constraints.schema_name AS table_schema,
+                constraints.table_name,
+                source_column.column_name,
+                constraints.schema_name AS referenced_schema,
+                constraints.referenced_table,
+                target_column.column_name AS referenced_column
+            FROM duckdb_constraints() AS constraints,
+                 UNNEST(constraints.constraint_column_names) WITH ORDINALITY
+                    AS source_column(column_name, ordinal_position),
+                 UNNEST(constraints.referenced_column_names) WITH ORDINALITY
+                    AS target_column(column_name, ordinal_position)
+            WHERE constraints.constraint_type = 'FOREIGN KEY'
+              AND source_column.ordinal_position = target_column.ordinal_position
+            ORDER BY constraints.schema_name,
+                     constraints.table_name,
+                     source_column.ordinal_position
+            """
+        )
 
     # ------------------------------------------------------------------
     # Context manager / cleanup

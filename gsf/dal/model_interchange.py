@@ -13,58 +13,55 @@ from typing import Any
 
 from nemo_retriever.tabular_data.ingestion.dal.queries_dal import add_query
 from nemo_retriever.tabular_data.ingestion.model.neo4j_node import Neo4jNode
-from nemo_retriever.tabular_data.ingestion.model.reserved_words import (
-    Edges,
-    Labels,
-    Props,
-)
+from nemo_retriever.tabular_data.ingestion.model.reserved_words import Edges
+from nemo_retriever.tabular_data.ingestion.model.reserved_words import Labels
+from nemo_retriever.tabular_data.ingestion.model.reserved_words import Props
 
 from gsf.dal.custom_analyses import detach_existing_sql_edges as detach_ca_sql_edges
-from gsf.dal.neo4j_tx import graph, write_transaction
-from gsf.dal.sql_attributes import detach_existing_sql_edges, link_to_term
-from gsf.semantic.constants import (
-    LABEL_COLUMN_ATTRIBUTE,
-    LABEL_SQL_ATTRIBUTE,
-    LABEL_TERM,
-    REL_HAS_ATTRIBUTE,
-    REL_PROPERTY_OF,
-    REL_REPRESENTS,
-    REL_SEMANTIC_FK,
-    SEMANTIC_SOURCE,
-    SQL_ATTR_SOURCE_BRIDGE,
-    SQL_ATTR_SOURCE_MANUAL,
-    SQL_ATTR_SOURCE_SQL,
-    SQL_ATTR_SOURCE_TABLE,
-)
-from gsf.server.model_interchange.embed import (
-    ColumnCatalogMeta,
-    ImportEmbedBuffer,
-    build_column_attribute_semantic_rows,
-    build_column_data_row,
-    build_custom_analysis_semantic_row,
-    build_sql_attribute_semantic_row,
-    build_table_data_row,
-    build_term_semantic_rows,
-)
-from gsf.server.model_interchange.schemas import (
-    GsfModelDocument,
-    ModelColumn,
-    ModelColumnAttribute,
-    ModelCustomAnalysis,
-    ModelDatabase,
-    ModelDataLayer,
-    ModelForeignKey,
-    ModelJoin,
-    ModelSchema,
-    ModelSemanticFk,
-    ModelSemanticLayer,
-    ModelSqlAttribute,
-    ModelSqlAttributesBySource,
-    ModelTable,
-    ModelTerm,
-)
-from gsf.server.sql_utils import get_dialects, get_schemas, validate_sql
-from gsf.utils.join_columns import dump_join_columns, parse_join_columns
+from gsf.dal.neo4j_tx import graph
+from gsf.dal.neo4j_tx import write_transaction
+from gsf.dal.sql_attributes import detach_existing_sql_edges
+from gsf.dal.sql_attributes import link_to_term
+from gsf.semantic.constants import LABEL_COLUMN_ATTRIBUTE
+from gsf.semantic.constants import LABEL_SQL_ATTRIBUTE
+from gsf.semantic.constants import LABEL_TERM
+from gsf.semantic.constants import REL_HAS_ATTRIBUTE
+from gsf.semantic.constants import REL_PROPERTY_OF
+from gsf.semantic.constants import REL_REPRESENTS
+from gsf.semantic.constants import REL_SEMANTIC_FK
+from gsf.semantic.constants import SEMANTIC_SOURCE
+from gsf.semantic.constants import SQL_ATTR_SOURCE_BRIDGE
+from gsf.semantic.constants import SQL_ATTR_SOURCE_MANUAL
+from gsf.semantic.constants import SQL_ATTR_SOURCE_SQL
+from gsf.semantic.constants import SQL_ATTR_SOURCE_TABLE
+from gsf.server.model_interchange.embed import ColumnCatalogMeta
+from gsf.server.model_interchange.embed import ImportEmbedBuffer
+from gsf.server.model_interchange.embed import build_column_attribute_semantic_rows
+from gsf.server.model_interchange.embed import build_column_data_row
+from gsf.server.model_interchange.embed import build_custom_analysis_semantic_row
+from gsf.server.model_interchange.embed import build_sql_attribute_semantic_row
+from gsf.server.model_interchange.embed import build_table_data_row
+from gsf.server.model_interchange.embed import build_term_semantic_rows
+from gsf.server.model_interchange.schemas import GsfModelDocument
+from gsf.server.model_interchange.schemas import ModelColumn
+from gsf.server.model_interchange.schemas import ModelColumnAttribute
+from gsf.server.model_interchange.schemas import ModelCustomAnalysis
+from gsf.server.model_interchange.schemas import ModelDatabase
+from gsf.server.model_interchange.schemas import ModelDataLayer
+from gsf.server.model_interchange.schemas import ModelForeignKey
+from gsf.server.model_interchange.schemas import ModelJoin
+from gsf.server.model_interchange.schemas import ModelSchema
+from gsf.server.model_interchange.schemas import ModelSemanticFk
+from gsf.server.model_interchange.schemas import ModelSemanticLayer
+from gsf.server.model_interchange.schemas import ModelSqlAttribute
+from gsf.server.model_interchange.schemas import ModelSqlAttributesBySource
+from gsf.server.model_interchange.schemas import ModelTable
+from gsf.server.model_interchange.schemas import ModelTerm
+from gsf.server.sql_utils import get_dialects
+from gsf.server.sql_utils import get_schemas
+from gsf.server.sql_utils import validate_sql
+from gsf.utils.join_columns import dump_join_columns
+from gsf.utils.join_columns import parse_join_columns
 from gsf.utils.sample_values import parse_sample_values
 
 logger = logging.getLogger(__name__)
@@ -278,8 +275,7 @@ def assemble_export_document(
             target_column_id=str(row["target_column_id"]),
         )
         for row in rows["foreign_keys"]
-        if str(row.get("source_column_id") or "") in column_ids
-        and str(row.get("target_column_id") or "") in column_ids
+        if str(row.get("source_column_id") or "") in column_ids and str(row.get("target_column_id") or "") in column_ids
     ]
     joins = [
         ModelJoin(
@@ -288,8 +284,7 @@ def assemble_export_document(
             join_columns=parse_join_columns(row.get("join_columns")),
         )
         for row in rows["joins"]
-        if str(row.get("source_table_id") or "") in table_ids
-        and str(row.get("target_table_id") or "") in table_ids
+        if str(row.get("source_table_id") or "") in table_ids and str(row.get("target_table_id") or "") in table_ids
     ]
     terms = [
         ModelTerm(
@@ -319,8 +314,7 @@ def assemble_export_document(
             column_id=str(row["column_id"]),
         )
         for row in rows["semantic_fks"]
-        if str(row.get("column_attribute_id") or "") in attribute_ids
-        and str(row.get("column_id") or "") in column_ids
+        if str(row.get("column_attribute_id") or "") in attribute_ids and str(row.get("column_id") or "") in column_ids
     ]
     sql_attributes = _assemble_sql_attributes(
         rows["sql_attributes"],
@@ -363,12 +357,7 @@ def assemble_export_document(
 
 def _catalog_ids(databases: list[ModelDatabase]) -> tuple[set[str], set[str]]:
     """Return the table and column ids the exported catalog actually carries."""
-    tables = [
-        table
-        for database in databases
-        for schema in database.schemas
-        for table in schema.tables
-    ]
+    tables = [table for database in databases for schema in database.schemas for table in schema.tables]
     return (
         {table.id for table in tables},
         {column.id for table in tables for column in table.columns},
@@ -437,10 +426,7 @@ def _assemble_databases(
     for db_entry in db_map.values():
         schemas: list[ModelSchema] = []
         for schema_entry in db_entry["schemas"].values():
-            tables = [
-                ModelTable(**table_entry)
-                for table_entry in schema_entry["tables"].values()
-            ]
+            tables = [ModelTable(**table_entry) for table_entry in schema_entry["tables"].values()]
             schemas.append(
                 ModelSchema(
                     id=schema_entry["id"],
@@ -608,6 +594,7 @@ def apply_import_model(
             skipped,
             embed_buffer,
             column_meta,
+            replace=replace,
         )
 
         if replace:
@@ -653,9 +640,7 @@ def apply_import_model(
         "skipped": skipped,
         "replace": replace,
         "terms": len(document.semantic_layer.terms),
-        "column_attributes": sum(
-            len(term.columns_attributes) for term in document.semantic_layer.terms
-        ),
+        "column_attributes": sum(len(term.columns_attributes) for term in document.semantic_layer.terms),
         "semantic_fks": len(document.semantic_layer.semantic_fks),
         "sql_attributes": sum(
             len(getattr(document.semantic_layer.sql_attributes, key))
@@ -851,22 +836,13 @@ def _changed_entity_ids(label: str, items: dict[str, dict[str, Any]]) -> set[str
     return {
         entity_id
         for entity_id, props in items.items()
-        if any(
-            existing.get(entity_id, {}).get(key, "") != value
-            for key, value in props.items()
-        )
+        if any(existing.get(entity_id, {}).get(key, "") != value for key, value in props.items())
     }
 
 
-def _update_entity_properties(
-    label: str, items: dict[str, dict[str, Any]], ids: set[str]
-) -> None:
+def _update_entity_properties(label: str, items: dict[str, dict[str, Any]], ids: set[str]) -> None:
     """Update changed entity properties in one batched write."""
-    rows = [
-        {"id": entity_id, "props": items[entity_id]}
-        for entity_id in ids
-        if entity_id in items
-    ]
+    rows = [{"id": entity_id, "props": items[entity_id]} for entity_id in ids if entity_id in items]
     if not rows:
         return
     graph().query_write(
@@ -877,6 +853,18 @@ def _update_entity_properties(
         """,
         {"rows": rows},
     )
+
+
+def _restore_resolved_entity_properties(
+    label: str,
+    items: list[tuple[str, dict[str, Any]]],
+    results: dict[str, tuple[str, bool]],
+) -> None:
+    """Restore import payload properties on already-resolved stable entities."""
+
+    properties_by_live_id = {results[imported_id][0]: properties for imported_id, properties in items}
+    changed_ids = _changed_entity_ids(label, properties_by_live_id)
+    _update_entity_properties(label, properties_by_live_id, changed_ids)
 
 
 def _ids_missing_has_sql(label: str, ids: list[str]) -> set[str]:
@@ -959,9 +947,7 @@ def _database_names_for_terms(term_ids: list[str]) -> dict[str, str]:
         """,
         {"term_ids": term_ids},
     )
-    return {
-        row["term_id"]: row["database_name"] for row in rows if row.get("database_name")
-    }
+    return {row["term_id"]: row["database_name"] for row in rows if row.get("database_name")}
 
 
 def _database_names_for_columns(column_ids: list[str]) -> dict[str, str]:
@@ -979,11 +965,7 @@ def _database_names_for_columns(column_ids: list[str]) -> dict[str, str]:
         """,
         {"column_ids": column_ids},
     )
-    return {
-        row["column_id"]: row["database_name"]
-        for row in rows
-        if row.get("database_name")
-    }
+    return {row["column_id"]: row["database_name"] for row in rows if row.get("database_name")}
 
 
 def _remap(id_map: dict[str, str], yaml_id: str, *, kind: str) -> str:
@@ -1002,6 +984,8 @@ def _import_catalog(
     skipped: dict[str, int],
     embed_buffer: ImportEmbedBuffer | None,
     column_meta: dict[str, ColumnCatalogMeta],
+    *,
+    replace: bool,
 ) -> list[str]:
     """Import databases/schemas/tables/columns level by level.
 
@@ -1022,10 +1006,7 @@ def _import_catalog(
 
     db_results = _resolve_entities_batch(
         Labels.DB,
-        [
-            (db.id, {"name": db_names[db.id]} if db_names[db.id] else {})
-            for db in databases
-        ],
+        [(db.id, {"name": db_names[db.id]} if db_names[db.id] else {}) for db in databases],
         match_by_name=True,
     )
     live_db_ids: list[str] = []
@@ -1037,6 +1018,13 @@ def _import_catalog(
             created["databases"] += 1
         else:
             skipped["databases"] += 1
+
+    if replace:
+        _restore_resolved_entity_properties(
+            Labels.DB,
+            [(db.id, {"name": db_names[db.id]} if db_names[db.id] else {}) for db in databases],
+            db_results,
+        )
 
     schema_parent_db: dict[str, str] = {}
     schema_db_names: dict[str, str] = {}
@@ -1054,6 +1042,9 @@ def _import_catalog(
             created["schemas"] += 1
         else:
             skipped["schemas"] += 1
+
+    if replace:
+        _restore_resolved_entity_properties(Labels.SCHEMA, schema_items, schema_results)
 
     if schema_items:
         graph().query_write(
@@ -1100,6 +1091,9 @@ def _import_catalog(
         else:
             skipped["tables"] += 1
 
+    if replace:
+        _restore_resolved_entity_properties(Labels.TABLE, table_items, table_results)
+
     if table_items:
         graph().query_write(
             f"""
@@ -1126,11 +1120,7 @@ def _import_catalog(
             schema_db_name = schema_db_names.get(schema.id, "")
             for table in schema.tables:
                 for ordinal, column in enumerate(table.columns, start=1):
-                    sample_values_json = (
-                        json.dumps(column.sample_values)
-                        if column.sample_values
-                        else None
-                    )
+                    sample_values_json = json.dumps(column.sample_values) if column.sample_values else None
                     column_parent_table[column.id] = table.id
                     column_meta[column.id] = ColumnCatalogMeta(
                         name=column.name,
@@ -1232,12 +1222,8 @@ def _import_catalog(
 def _import_foreign_keys(document: GsfModelDocument, id_map: dict[str, str]) -> None:
     rows = [
         {
-            "source_column_id": _remap(
-                id_map, fk.source_column_id, kind="foreign-key source column"
-            ),
-            "target_column_id": _remap(
-                id_map, fk.target_column_id, kind="foreign-key target column"
-            ),
+            "source_column_id": _remap(id_map, fk.source_column_id, kind="foreign-key source column"),
+            "target_column_id": _remap(id_map, fk.target_column_id, kind="foreign-key target column"),
         }
         for fk in document.data_layer.foreign_keys
     ]
@@ -1257,12 +1243,8 @@ def _import_foreign_keys(document: GsfModelDocument, id_map: dict[str, str]) -> 
 def _import_joins(document: GsfModelDocument, id_map: dict[str, str]) -> None:
     rows = [
         {
-            "source_table_id": _remap(
-                id_map, join.source_table_id, kind="join source table"
-            ),
-            "target_table_id": _remap(
-                id_map, join.target_table_id, kind="join target table"
-            ),
+            "source_table_id": _remap(id_map, join.source_table_id, kind="join source table"),
+            "target_table_id": _remap(id_map, join.target_table_id, kind="join target table"),
             "join_columns": dump_join_columns(join.join_columns),
         }
         for join in document.data_layer.joins
@@ -1286,11 +1268,7 @@ def _delete_scoped_semantics_not_in_payload(
     live_db_ids: list[str],
 ) -> None:
     keep_term_ids = [term.id for term in document.semantic_layer.terms]
-    keep_attr_ids = [
-        attr.id
-        for term in document.semantic_layer.terms
-        for attr in term.columns_attributes
-    ]
+    keep_attr_ids = [attr.id for term in document.semantic_layer.terms for attr in term.columns_attributes]
     keep_sql_attr_ids = [
         attr.id
         for attrs in (
@@ -1421,10 +1399,7 @@ def _import_terms(
             skipped["terms"] += 1
             if live_term_id in changed_term_ids:
                 embedded_term_ids.append(live_term_id)
-        table_ids = [
-            _remap(id_map, table_id, kind="term represents table")
-            for table_id in term.represents
-        ]
+        table_ids = [_remap(id_map, table_id, kind="term represents table") for table_id in term.represents]
         represents_rows.append({"term_id": live_term_id, "table_ids": table_ids})
 
     if represents_rows:
@@ -1473,11 +1448,7 @@ def _import_column_attributes(
         live_term_id = _remap(id_map, term.id, kind="term")
         for attr in term.columns_attributes:
             col_ctx = column_meta.get(attr.column_id)
-            live_table_id = (
-                _remap(id_map, col_ctx.table_yaml_id, kind="column attribute table")
-                if col_ctx
-                else ""
-            )
+            live_table_id = _remap(id_map, col_ctx.table_yaml_id, kind="column attribute table") if col_ctx else ""
             attr_items.append(
                 (
                     attr.id,
@@ -1501,14 +1472,10 @@ def _import_column_attributes(
 
     attr_results = _resolve_entities_batch(LABEL_COLUMN_ATTRIBUTE, attr_items)
     props_by_live_id = {
-        attr_results[attr_id][0]: props
-        for attr_id, props in attr_items
-        if not attr_results[attr_id][1]
+        attr_results[attr_id][0]: props for attr_id, props in attr_items if not attr_results[attr_id][1]
     }
     changed_attr_ids = _changed_entity_ids(LABEL_COLUMN_ATTRIBUTE, props_by_live_id)
-    _update_entity_properties(
-        LABEL_COLUMN_ATTRIBUTE, props_by_live_id, changed_attr_ids
-    )
+    _update_entity_properties(LABEL_COLUMN_ATTRIBUTE, props_by_live_id, changed_attr_ids)
 
     edge_rows: list[dict[str, Any]] = []
     for attr_id, (live_attr_id, was_created) in attr_results.items():
@@ -1529,11 +1496,7 @@ def _import_column_attributes(
                 "term_id": ctx["live_term_id"],
             },
         )
-        if (
-            embed_buffer is not None
-            and (was_created or live_attr_id in changed_attr_ids)
-            and col_ctx is not None
-        ):
+        if embed_buffer is not None and (was_created or live_attr_id in changed_attr_ids) and col_ctx is not None:
             embed_buffer.semantic_rows.extend(
                 build_column_attribute_semantic_rows(
                     database_name=col_ctx.database_name,
@@ -1568,9 +1531,7 @@ def _import_semantic_fks(document: GsfModelDocument, id_map: dict[str, str]) -> 
     rows = [
         {
             "column_id": _remap(id_map, fk.column_id, kind="semantic fk column"),
-            "column_attribute_id": _remap(
-                id_map, fk.column_attribute_id, kind="semantic fk attribute"
-            ),
+            "column_attribute_id": _remap(id_map, fk.column_attribute_id, kind="semantic fk attribute"),
         }
         for fk in document.semantic_layer.semantic_fks
     ]
@@ -1780,20 +1741,12 @@ def _import_custom_analyses(
         Labels.CUSTOM_ANALYSIS,
         [ca_results[analysis.id][0] for analysis in analyses],
     )
-    live_ids_by_yaml_id = {
-        analysis.id: ca_results[analysis.id][0] for analysis in analyses
-    }
-    changed_payload_ids = (
-        _custom_analysis_ids_with_changed_payload(analyses, live_ids_by_yaml_id)
-        if replace
-        else set()
-    )
+    live_ids_by_yaml_id = {analysis.id: ca_results[analysis.id][0] for analysis in analyses}
+    changed_payload_ids = _custom_analysis_ids_with_changed_payload(analyses, live_ids_by_yaml_id) if replace else set()
 
     def _ca_needs_sql(analysis: ModelCustomAnalysis) -> bool:
         live_id, was_created = ca_results[analysis.id]
-        return (
-            was_created or live_id in missing_sql_ids or live_id in changed_payload_ids
-        )
+        return was_created or live_id in missing_sql_ids or live_id in changed_payload_ids
 
     live_col_by_analysis: dict[str, str | None] = {}
     lookup_col_ids: list[str] = []

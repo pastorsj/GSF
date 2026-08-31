@@ -27,7 +27,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
+from pydantic import ConfigDict
+from pydantic import Field
 
 __all__ = [
     "ApiModel",
@@ -360,6 +362,7 @@ class PqlAnalysis(ApiModel):
     """A verified PQL few-shot. The PQL text is a property, not a child node."""
 
     id: str
+    database_name: str | None = None
     name: str | None = None
     description: str | None = None
     pql: str | None = None

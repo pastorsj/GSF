@@ -15,11 +15,11 @@ The filter shape is chosen by the VDB the caller plugged in (read off
 
 * ``"sql"`` (default) — SQL ``LIKE`` predicate over the JSON ``metadata``
   column, fed to LanceDB's ``.where()`` API.
-* ``"dict"`` — flat ``{column: value | [values]}`` mapping, fed straight
-  into the backend's native dict-filter API (e.g.
-  ``PGVector.similarity_search_with_score_by_vector(..., filter=)``). The
-  customer's VDB is responsible for storing ``label`` / ``database_name``
-  as top-level columns so the keys match.
+* ``"dict"`` — langchain-postgres filter mapping, including nested logical
+  operators for governed-path exclusions, fed straight into the backend's
+  native dict-filter API. The customer's VDB is responsible for storing
+  ``label`` / ``database_name`` as top-level columns so those keys match;
+  other metadata fields can remain in its JSON metadata column.
 """
 
 from __future__ import annotations
@@ -27,7 +27,9 @@ from __future__ import annotations
 import ast
 import json
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
+from typing import Any
+from typing import Literal
 
 from nemo_retriever.tabular_data.ingestion.model.reserved_words import Labels
 
@@ -104,7 +106,7 @@ def _vector_distance_value(distance: object | None) -> float:
         return float("inf")
 
 
-def _resolve_label_k(per_label_k: "int | dict[str, int]", label: str | None) -> int:
+def _resolve_label_k(per_label_k: int | dict[str, int], label: str | None) -> int:
     """Return the top-k for *label* given a scalar or per-label dict."""
     if isinstance(per_label_k, dict):
         return per_label_k.get(label or "", PER_LABEL_LIMIT)
@@ -113,12 +115,7 @@ def _resolve_label_k(per_label_k: "int | dict[str, int]", label: str | None) -> 
 
 def _escape_like(value: str) -> str:
     """Escape a literal for use inside a LIKE pattern with ``ESCAPE '\\'``."""
-    return (
-        value.replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-        .replace("'", "''")
-    )
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("'", "''")
 
 
 def _build_metadata_where_clause(
@@ -127,6 +124,7 @@ def _build_metadata_where_clause(
     schema_name: str | None = None,
     *,
     fmt: MetadataFilterFormat = "sql",
+    excluded_catalog_paths: set[tuple[str, str]] | None = None,
 ) -> str | dict | None:
     """Build a per-query metadata filter for ``label`` / ``database_name`` / ``schema_name``.
 
@@ -138,49 +136,61 @@ def _build_metadata_where_clause(
       escaped via :func:`_escape_like` and the predicate declares
       ``ESCAPE '\\'`` so ``%`` / ``_`` / ``\\`` in inputs are treated
       literally.
-    * ``"dict"`` — flat mapping suitable for backends whose filter API
-      consumes a dict (e.g. pgvector). A single label lands as
-      ``{"label": "Column"}``; multiple labels become ``{"label": [...]}``
-      (which langchain-pgvector interprets as an ``IN``-list).
+    * ``"dict"`` — a langchain-postgres filter mapping.  Ordinary equality
+      predicates stay compact, while governed-path exclusions use its nested
+      ``$and`` / ``$not`` representation so excluded views are removed by
+      Postgres *before* the vector ``LIMIT`` is applied.
 
     Returns ``None`` when no filter criteria are supplied.
     """
-    if not labels and not database_name and not schema_name:
+    if not labels and not database_name and not schema_name and not excluded_catalog_paths:
         return None
 
     if fmt == "dict":
-        out: dict = {}
+        predicates: list[dict[str, Any]] = []
         if labels:
-            out["label"] = labels[0] if len(labels) == 1 else list(labels)
+            predicates.append({"label": labels[0] if len(labels) == 1 else {"$in": list(labels)}})
         if database_name:
-            out["database_name"] = database_name
+            predicates.append({"database_name": database_name})
         if schema_name:
-            out["schema_name"] = schema_name
-        return out
+            predicates.append({"schema_name": schema_name})
+        predicates.extend(
+            {
+                "$not": {
+                    "$and": [
+                        {"database_name": excluded_database},
+                        {"schema_name": excluded_schema},
+                    ]
+                }
+            }
+            for excluded_database, excluded_schema in sorted(excluded_catalog_paths or set())
+        )
+        if not predicates:
+            return None
+        if len(predicates) == 1:
+            return predicates[0]
+        return {"$and": predicates}
 
     parts: list[str] = []
     if labels:
-        label_preds = [
-            f"""metadata LIKE '%"label":"{_escape_like(lab)}"%' ESCAPE '\\'"""
-            for lab in labels
-        ]
-        parts.append(
-            "(" + " OR ".join(label_preds) + ")"
-            if len(label_preds) > 1
-            else label_preds[0]
-        )
+        label_preds = [f"""metadata LIKE '%"label":"{_escape_like(lab)}"%' ESCAPE '\\'""" for lab in labels]
+        parts.append("(" + " OR ".join(label_preds) + ")" if len(label_preds) > 1 else label_preds[0])
     if database_name:
-        parts.append(
-            f"""metadata LIKE '%"database_name":"{_escape_like(database_name)}"%' ESCAPE '\\'"""
-        )
+        parts.append(f"""metadata LIKE '%"database_name":"{_escape_like(database_name)}"%' ESCAPE '\\'""")
     if schema_name:
+        parts.append(f"""metadata LIKE '%"schema_name":"{_escape_like(schema_name)}"%' ESCAPE '\\'""")
+    for excluded_database, excluded_schema in sorted(excluded_catalog_paths or set()):
         parts.append(
-            f"""metadata LIKE '%"schema_name":"{_escape_like(schema_name)}"%' ESCAPE '\\'"""
+            "NOT ("
+            f"metadata LIKE '%\"database_name\":\"{_escape_like(excluded_database)}\"%' ESCAPE '\\' "
+            "AND "
+            f"metadata LIKE '%\"schema_name\":\"{_escape_like(excluded_schema)}\"%' ESCAPE '\\'"
+            ")"
         )
     return " AND ".join(parts) if parts else None
 
 
-def _metadata_filter_format(retriever: "Retriever") -> MetadataFilterFormat:
+def _metadata_filter_format(retriever: Retriever) -> MetadataFilterFormat:
     """Read the per-VDB filter format off the retriever's plugged-in VDB.
 
     Tabular callers construct the VDB themselves and pass it as
@@ -197,7 +207,10 @@ def _metadata_filter_format(retriever: "Retriever") -> MetadataFilterFormat:
 def _hits_to_semantic_rows(
     hits: list[dict],
     label_filter: set[str] | None = None,
-    per_label_k: "int | dict[str, int]" = PER_LABEL_LIMIT,
+    per_label_k: int | dict[str, int] = PER_LABEL_LIMIT,
+    *,
+    database_name: str | None = None,
+    excluded_catalog_paths: set[tuple[str, str]] | None = None,
 ) -> list[dict]:
     """Turn raw vector hits into candidate dicts, filtering by label in Python.
 
@@ -209,8 +222,15 @@ def _hits_to_semantic_rows(
     """
     label_counts: dict[str, int] = {}
     rows: list[dict] = []
+    excluded_folded = {
+        (database.casefold(), schema.casefold()) for database, schema in (excluded_catalog_paths or set())
+    }
     for hit in hits:
         meta = _parse_hit_metadata(hit)
+        hit_database = str(meta.get("database_name") or database_name or "").casefold()
+        hit_schema = str(meta.get("schema_name") or "").casefold()
+        if (hit_database, hit_schema) in excluded_folded:
+            continue
         cid = meta.get("id")
         if cid is None:
             continue
@@ -237,11 +257,26 @@ def _hits_to_semantic_rows(
     return rows
 
 
+def _configured_governed_view_paths(
+    database_name: str | None,
+) -> set[tuple[str, str]]:
+    """Return contract-owned view schemas excluded from ordinary retrieval."""
+
+    from gsf.retrieval.kumo.graph_contract import load_graph_contracts
+
+    selected = (database_name or "").strip().casefold()
+    return {
+        (contract.database_name, contract.schema_name)
+        for contract in load_graph_contracts()
+        if not selected or contract.database_name.casefold() == selected
+    }
+
+
 def search_semantic_index(
-    retriever: "Retriever",
+    retriever: Retriever,
     entity: str,
     label_filter: list[str] | None = None,
-    per_label_k: "int | dict[str, int]" = PER_LABEL_LIMIT,
+    per_label_k: int | dict[str, int] = PER_LABEL_LIMIT,
     database_name: str | None = None,
     schema_name: str | None = None,
 ) -> list[dict]:
@@ -258,6 +293,7 @@ def search_semantic_index(
     plugged into the retriever — see :func:`_metadata_filter_format`.
     """
     fmt = _metadata_filter_format(retriever)
+    excluded_catalog_paths = _configured_governed_view_paths(database_name) if schema_name is None else set()
 
     allowed_labels = {str(x) for x in (label_filter or []) if x is not None} or None
     labels_to_query = list(allowed_labels) if allowed_labels else [None]
@@ -269,17 +305,18 @@ def search_semantic_index(
             database_name=database_name,
             schema_name=schema_name,
             fmt=fmt,
+            excluded_catalog_paths=excluded_catalog_paths,
         )
         vdb_kwargs = {"where": where_clause} if where_clause else None
-        top_k = (
-            _resolve_label_k(per_label_k, label)
-            if where_clause
-            else DEFAULT_FETCH_LIMIT
-        )
+        top_k = _resolve_label_k(per_label_k, label) if where_clause else DEFAULT_FETCH_LIMIT
 
         hits = retriever.query(entity, top_k=top_k, vdb_kwargs=vdb_kwargs)
         all_hits.extend(hits)
 
     return _hits_to_semantic_rows(
-        all_hits, label_filter=allowed_labels, per_label_k=per_label_k
+        all_hits,
+        label_filter=allowed_labels,
+        per_label_k=per_label_k,
+        database_name=database_name,
+        excluded_catalog_paths=excluded_catalog_paths,
     )

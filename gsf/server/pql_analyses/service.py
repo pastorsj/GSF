@@ -16,17 +16,15 @@ import logging
 import uuid
 from typing import Any
 
-from gsf.dal.pql_analyses import (
-    PqlAnalysisNameConflict,
-    PqlAnalysisPqlConflict,
-    delete_pql_analysis_node,
-    embed_pql_analyses,
-    find_pql_analysis_by_name,
-    find_pql_analysis_by_pql,
-    get_pql_analysis_by_id,
-    list_pql_analyses,
-    upsert_pql_analysis_node,
-)
+from gsf.dal.pql_analyses import PqlAnalysisNameConflict
+from gsf.dal.pql_analyses import PqlAnalysisPqlConflict
+from gsf.dal.pql_analyses import delete_pql_analysis_node
+from gsf.dal.pql_analyses import embed_pql_analyses
+from gsf.dal.pql_analyses import find_pql_analysis_by_name
+from gsf.dal.pql_analyses import find_pql_analysis_by_pql
+from gsf.dal.pql_analyses import get_pql_analysis_by_id
+from gsf.dal.pql_analyses import list_pql_analyses
+from gsf.dal.pql_analyses import upsert_pql_analysis_node
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +50,7 @@ def _embed(analysis_id: str) -> None:
 
 
 def create_pql_analysis(
+    database_name: str,
     name: str,
     description: str,
     pql: str,
@@ -60,31 +59,36 @@ def create_pql_analysis(
 
     Raises :class:`PqlAnalysisNameConflict` when ``name`` is already used and
     :class:`PqlAnalysisPqlConflict` when ``pql`` is already attached. Returns
-    ``{id, name, description, pql}``.
+    ``{id, database_name, name, description, pql}``.
     """
-    name_conflict = find_pql_analysis_by_name(name, exclude_id=None)
+    name_conflict = find_pql_analysis_by_name(name, exclude_id=None, database_name=database_name)
     if name_conflict is not None:
         raise PqlAnalysisNameConflict(
-            f"another PqlAnalysis already uses name {name!r} "
-            f"(id={name_conflict['id']!r})",
+            f"another PqlAnalysis already uses name {name!r} (id={name_conflict['id']!r})",
         )
 
-    pql_conflict = find_pql_analysis_by_pql(pql, exclude_id=None)
+    pql_conflict = find_pql_analysis_by_pql(pql, exclude_id=None, database_name=database_name)
     if pql_conflict is not None:
         raise PqlAnalysisPqlConflict(
-            f"this PQL is already used by PqlAnalysis {pql_conflict['name']!r} "
-            f"(id={pql_conflict['id']!r})",
+            f"this PQL is already used by PqlAnalysis {pql_conflict['name']!r} (id={pql_conflict['id']!r})",
         )
 
     analysis_id = str(uuid.uuid4())
-    upsert_pql_analysis_node(analysis_id, name, description, pql)
+    upsert_pql_analysis_node(analysis_id, database_name, name, description, pql)
     _embed(analysis_id)
 
-    return {"id": analysis_id, "name": name, "description": description, "pql": pql}
+    return {
+        "id": analysis_id,
+        "database_name": database_name,
+        "name": name,
+        "description": description,
+        "pql": pql,
+    }
 
 
 def update_pql_analysis(
     analysis_id: str,
+    database_name: str,
     name: str,
     description: str,
     pql: str,
@@ -94,31 +98,35 @@ def update_pql_analysis(
     Returns the updated row or ``None`` when no analysis with ``analysis_id`` exists.
     Raises :class:`PqlAnalysisNameConflict` / :class:`PqlAnalysisPqlConflict`.
     """
-    if get_pql_analysis_by_id(analysis_id) is None:
+    if get_pql_analysis_by_id(analysis_id, database_name=database_name) is None:
         return None
 
-    name_conflict = find_pql_analysis_by_name(name, exclude_id=analysis_id)
+    name_conflict = find_pql_analysis_by_name(name, exclude_id=analysis_id, database_name=database_name)
     if name_conflict is not None:
         raise PqlAnalysisNameConflict(
-            f"another PqlAnalysis already uses name {name!r} "
-            f"(id={name_conflict['id']!r})",
+            f"another PqlAnalysis already uses name {name!r} (id={name_conflict['id']!r})",
         )
 
-    pql_conflict = find_pql_analysis_by_pql(pql, exclude_id=analysis_id)
+    pql_conflict = find_pql_analysis_by_pql(pql, exclude_id=analysis_id, database_name=database_name)
     if pql_conflict is not None:
         raise PqlAnalysisPqlConflict(
-            f"this PQL is already used by PqlAnalysis {pql_conflict['name']!r} "
-            f"(id={pql_conflict['id']!r})",
+            f"this PQL is already used by PqlAnalysis {pql_conflict['name']!r} (id={pql_conflict['id']!r})",
         )
 
-    upsert_pql_analysis_node(analysis_id, name, description, pql)
+    upsert_pql_analysis_node(analysis_id, database_name, name, description, pql)
 
     from gsf.vdb import get_semantic_vdb
 
     get_semantic_vdb().delete_by_id(analysis_id)
     _embed(analysis_id)
 
-    return {"id": analysis_id, "name": name, "description": description, "pql": pql}
+    return {
+        "id": analysis_id,
+        "database_name": database_name,
+        "name": name,
+        "description": description,
+        "pql": pql,
+    }
 
 
 def delete_pql_analysis(analysis_id: str) -> dict[str, str] | None:
