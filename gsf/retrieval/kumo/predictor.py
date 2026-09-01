@@ -425,6 +425,10 @@ class PredictionContext:
     graph_ddl: str
     graph_edges: Any
     graph_col_stypes: Any
+    # Bounded low-cardinality values from the exact frames supplied to Kumo.
+    # These keep both PQL and entity-selection SQL literals faithful to the
+    # warehouse without exposing identifiers or high-cardinality measures.
+    column_reference: str
     time_columns: Any
     table_names: dict[str, str]
     # Per table (casefolded), the identity of every loaded row: bare values for a
@@ -792,6 +796,56 @@ def _entity_ids(graph: Any, frames: dict[str, pd.DataFrame]) -> dict[str, list[A
     return entity_ids
 
 
+_MAX_CATEGORICAL_VALUES = 12
+_MAX_CATEGORICAL_VALUE_CHARS = 80
+
+
+def _categorical_value_reference(
+    frames: dict[str, pd.DataFrame],
+    col_stypes: dict[str, dict[str, str]],
+) -> str:
+    """Render exact low-cardinality literals for the text-to-PQL prompt.
+
+    The graph DDL tells the model that a column is categorical, but not how its
+    values are cased.  That omission can produce SQL such as ``status = 'open'``
+    against a case-sensitive warehouse value ``Open``.  Only categorical
+    columns whose complete distinct set fits within a small bound are included;
+    IDs, free text, numeric measures, and partial high-cardinality samples never
+    enter the prompt.
+    """
+
+    lines: list[str] = []
+    for table_name, frame in frames.items():
+        table_stypes = col_stypes.get(table_name.casefold(), {})
+        frame_columns = {str(column).casefold(): column for column in frame.columns}
+        for column_name, stype in table_stypes.items():
+            if str(stype).casefold() != "categorical":
+                continue
+            frame_column = frame_columns.get(column_name.casefold())
+            if frame_column is None:
+                continue
+
+            values: list[Any] = []
+            too_many = False
+            for raw_value in frame[frame_column].dropna().drop_duplicates().tolist():
+                value = _json_safe(raw_value)
+                if not isinstance(value, (str, int, float, bool)):
+                    continue
+                if isinstance(value, str) and len(value) > _MAX_CATEGORICAL_VALUE_CHARS:
+                    continue
+                values.append(value)
+                if len(values) > _MAX_CATEGORICAL_VALUES:
+                    too_many = True
+                    break
+            if not values or too_many:
+                continue
+            lines.append(
+                f"- table={json.dumps(table_name)}, column={json.dumps(str(frame_column))}, "
+                f"type=categorical, exact values={json.dumps(values, ensure_ascii=False)}"
+            )
+    return "\n".join(lines)
+
+
 def build_prediction_context(
     connectors: list[Any],
     relevant_tables: list[dict[str, Any]] | None = None,
@@ -894,6 +948,7 @@ def build_prediction_context(
     graph_ddl, edges, col_stypes, time_columns = build_graph_context(graph)
     kumo_model = KumoModel(client.kumorfm(graph), graph)
     entity_ids = _entity_ids(graph, frames)
+    column_reference = _categorical_value_reference(frames, col_stypes)
     graph_receipt = _build_graph_receipt(
         database_name=selected_database,
         graph=graph,
@@ -911,6 +966,7 @@ def build_prediction_context(
         graph_ddl=graph_ddl,
         graph_edges=edges,
         graph_col_stypes=col_stypes,
+        column_reference=column_reference,
         time_columns=time_columns,
         table_names=name_map,
         entity_ids=entity_ids,
@@ -932,6 +988,7 @@ def run_prediction(question: str, llm: Any, context: PredictionContext) -> dict[
         graph_ddl=context.graph_ddl,
         graph_edges=context.graph_edges,
         graph_col_stypes=context.graph_col_stypes,
+        column_reference=context.column_reference,
         time_columns=context.time_columns,
         table_names=context.table_names,
         available_entity_ids=context.entity_ids,

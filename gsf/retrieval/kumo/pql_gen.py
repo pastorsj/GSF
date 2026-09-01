@@ -316,6 +316,10 @@ class PqlGroupByError(ValueError):
     """A grouped-prediction request that cannot be served (bad group-by column, or wrong target type)."""
 
 
+class PqlEntitySelectionError(ValueError):
+    """The model-authored entity SQL selected no row present in the prediction graph."""
+
+
 def _is_forecast(pql: str) -> bool:
     """A ``FORECAST n TIMEFRAMES`` query: predicts a time series for a SINGLE entity (SDK constraint)."""
     return re.search(r"\bFORECAST\b", pql, re.IGNORECASE) is not None
@@ -1099,6 +1103,12 @@ def _resolve_indices(
         if available is not None:
             allowed = set(available)
             ids = [value for value in ids if value in allowed]
+        if not ids:
+            raise PqlEntitySelectionError(
+                "The entity-selection SQL matched zero graph-backed rows. Regenerate the entity-selection SQL "
+                "while preserving the requested population, using the exact table and column names and exact "
+                "categorical literals shown in the Columns section. Do not remove the requested scope."
+            )
     elif available is not None:
         ids = available
     else:
