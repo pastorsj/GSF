@@ -9,6 +9,7 @@ from gsf.retrieval.kumo.graph_contract import GraphContractEdge
 from gsf.retrieval.kumo.graph_contract import GraphContractTable
 from gsf.retrieval.kumo.predictor import PredictionContext
 from gsf.retrieval.kumo.predictor import _build_graph_receipt
+from gsf.retrieval.kumo.predictor import _categorical_value_reference
 from gsf.retrieval.kumo.predictor import _contract_view_sources
 from gsf.retrieval.kumo.predictor import _deduplicate_inferred_links
 from gsf.retrieval.kumo.predictor import _load_relevant_frames
@@ -61,6 +62,42 @@ def test_deduplicate_inferred_links_prefers_destination_primary_key_name() -> No
         _Edge("JOB_OUTCOMES", "job_id", "JOBS"),
         _Edge("JOBS", "project_id", "PROJECTS"),
     ]
+
+
+def test_categorical_value_reference_is_exact_and_bounded_to_complete_low_cardinality_sets() -> None:
+    frames = {
+        "entities": pd.DataFrame(
+            {
+                "entity_id": ["entity-1", "entity-2", "entity-3"],
+                "lifecycle_status": ["Active", "Partially Active", "Active"],
+                "free_text": [f"description-{index}" for index in range(3)],
+            }
+        ),
+        "events": pd.DataFrame(
+            {
+                "event_id": list(range(13)),
+                "category": [f"category-{index}" for index in range(13)],
+            }
+        ),
+    }
+    stypes = {
+        "entities": {
+            "entity_id": "ID",
+            "lifecycle_status": "categorical",
+            "free_text": "text",
+        },
+        "events": {"event_id": "ID", "category": "categorical"},
+    }
+
+    reference = _categorical_value_reference(frames, stypes)
+
+    assert 'column="lifecycle_status"' in reference
+    assert 'exact values=["Active", "Partially Active"]' in reference
+    assert "entity-1" not in reference
+    assert "description-0" not in reference
+    # A partial list would teach the model that omitted values do not exist, so
+    # a categorical set above the bound is omitted instead of truncated.
+    assert "category-0" not in reference
 
 
 class _Connector:

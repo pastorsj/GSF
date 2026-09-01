@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 from gsf.retrieval.kumo import pql_gen
+from gsf.retrieval.kumo.pql_gen import PqlEntitySelectionError
 from gsf.retrieval.kumo.pql_gen import _forecast_anchor
 from gsf.retrieval.kumo.pql_gen import _is_context_capacity_error
 from gsf.retrieval.kumo.pql_gen import _is_context_size_limit_error
@@ -11,6 +12,7 @@ from gsf.retrieval.kumo.pql_gen import _resolve_indices
 from gsf.retrieval.kumo.pql_gen import _retry_at_full_neighbourhood
 from gsf.retrieval.kumo.pql_gen import canonicalize_pql_identifiers
 from gsf.retrieval.kumo.pql_gen import extract_pql
+from gsf.retrieval.kumo.pql_gen import generate_pql
 from gsf.retrieval.kumo.pql_gen import parse_entity
 
 # The SDK's client-side per-table row cap (kumorfm.rfm.payload.validate_payload_table_rows).
@@ -32,6 +34,11 @@ class _Connector:
 class _UnexpectedConnector:
     def execute(self, _sql: str) -> pd.DataFrame:
         raise AssertionError("source database should not be queried")
+
+
+class _EmptyConnector:
+    def execute(self, _sql: str) -> pd.DataFrame:
+        return pd.DataFrame({"ENTITY_ID": []})
 
 
 class _MaxTimestampConnector:
@@ -102,6 +109,85 @@ def test_resolve_indices_uses_ids_loaded_into_graph() -> None:
         2,
         available_entity_ids={"jobs": ["job-in-graph-1", "job-in-graph-2", "job-in-graph-3"]},
     ) == ["job-in-graph-1", "job-in-graph-2"]
+
+
+def test_resolve_indices_does_not_turn_an_empty_explicit_scope_into_predict_all() -> None:
+    with pytest.raises(PqlEntitySelectionError, match="matched zero graph-backed rows"):
+        _resolve_indices(
+            "PREDICT events.outcome FOR EACH entities.entity_id",
+            "SELECT entity_id FROM entities WHERE lifecycle_status = 'active'",
+            _EmptyConnector(),
+            10,
+            available_entity_ids={"entities": ["entity-1", "entity-2"]},
+        )
+
+
+def test_generate_pql_repairs_empty_entity_sql_without_calling_predict_with_none(monkeypatch) -> None:
+    responses = iter(
+        [
+            """```pql
+PREDICT COUNT(events.* WHERE events.outcome = 'Failed', 0, 30, days) > 0 FOR EACH entities.entity_id
+```
+```sql
+SELECT entity_id FROM entities WHERE lifecycle_status = 'active'
+```""",
+            """```pql
+PREDICT COUNT(events.* WHERE events.outcome = 'Failed', 0, 30, days) > 0 FOR EACH entities.entity_id
+```
+```sql
+SELECT entity_id FROM entities WHERE lifecycle_status = 'Active'
+```""",
+        ]
+    )
+    prompts: list[str] = []
+
+    def invoke(_llm, prompt: str) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    class Connector:
+        def execute(self, sql: str) -> pd.DataFrame:
+            if "'active'" in sql:
+                return pd.DataFrame({"entity_id": []})
+            return pd.DataFrame({"entity_id": ["entity-1"]})
+
+    class Model:
+        def __init__(self) -> None:
+            self.indices: list[list[str] | None] = []
+
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, indices=None, **_kwargs) -> pd.DataFrame:
+            self.indices.append(indices)
+            return pd.DataFrame({"ENTITY": indices, "TRUE_PROB": [0.75]})
+
+    model = Model()
+    monkeypatch.setattr(pql_gen, "invoke_text", invoke)
+
+    result = generate_pql(
+        "Which active entities are likely to fail?",
+        llm=object(),
+        kumo_model=model,
+        connector=Connector(),
+        graph_ddl=(
+            "entities(entity_id ID, lifecycle_status categorical)  -- PRIMARY KEY (entity_id)\n"
+            "events(event_id ID, entity_id ID, outcome categorical)  -- PRIMARY KEY (event_id)\n"
+            "FOREIGN KEY events.entity_id -> entities.<pk>"
+        ),
+        graph_edges=[("events", "entity_id", "entities")],
+        column_reference=(
+            '- table="entities", column="lifecycle_status", type=categorical, exact values=["Active", "Inactive"]'
+        ),
+        available_entity_ids={"entities": ["entity-1"]},
+        max_tries=2,
+    )
+
+    assert result.success
+    assert result.attempts == 2
+    assert model.indices == [["entity-1"]]
+    assert 'exact values=["Active", "Inactive"]' in prompts[0]
+    assert "entity-selection SQL matched zero graph-backed rows" in prompts[1]
 
 
 def test_forecast_anchor_inherits_timezone_from_aware_source_column() -> None:
