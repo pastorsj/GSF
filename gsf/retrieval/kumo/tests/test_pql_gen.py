@@ -14,6 +14,9 @@ from gsf.retrieval.kumo.pql_gen import canonicalize_pql_identifiers
 from gsf.retrieval.kumo.pql_gen import extract_pql
 from gsf.retrieval.kumo.pql_gen import generate_pql
 from gsf.retrieval.kumo.pql_gen import parse_entity
+from gsf.retrieval.kumo.provider import KumoProviderCompatibilityError
+from gsf.retrieval.kumo.provider import KumoProviderReadiness
+from gsf.retrieval.kumo.provider import KumoProviderUnavailableError
 
 # The SDK's client-side per-table row cap (kumorfm.rfm.payload.validate_payload_table_rows).
 _ROW_LIMIT_ERROR = (
@@ -239,6 +242,91 @@ def test_row_limit_rejection_steps_down_instead_of_retrying_at_full() -> None:
 def test_unrelated_errors_are_not_classified_as_row_limit() -> None:
     assert not _is_context_size_limit_error("Failed to parse query")
     assert not _is_context_capacity_error("Failed to parse query")
+
+
+def test_provider_contract_failure_does_not_regenerate_pql(monkeypatch) -> None:
+    calls = 0
+
+    def invoke(_llm, _prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "PREDICT entities.status FOR EACH entities.entity_id"
+
+    class Model:
+        def validate_pql(self, _query: str) -> None:
+            raise KumoProviderCompatibilityError(
+                KumoProviderReadiness(
+                    status="incompatible",
+                    ready=False,
+                    expected_model="kumo-rfm",
+                    advertised_models=("kumo-relational",),
+                    nvidia_sdfm_version="0.2.1",
+                    kumorfm_version="2.28.0",
+                    error_code="KUMO_PROVIDER_MODEL_INCOMPATIBLE",
+                )
+            )
+
+    monkeypatch.setattr(pql_gen, "invoke_text", invoke)
+    result = generate_pql(
+        "Predict entity status",
+        llm=object(),
+        kumo_model=Model(),
+        connector=_UnexpectedConnector(),
+        graph_ddl="entities(entity_id ID, status categorical)  -- PRIMARY KEY (entity_id)",
+        available_entity_ids={"entities": ["entity-1"]},
+        max_tries=5,
+    )
+
+    assert result.success is False
+    assert result.attempts == 1
+    assert calls == 1
+    assert "not a forecast" in str(result.error)
+
+
+@pytest.mark.parametrize(("retryable", "expected_attempts"), [(False, 1), (True, 3)])
+def test_typed_provider_unavailability_repairs_only_when_retryable(
+    monkeypatch,
+    retryable: bool,
+    expected_attempts: int,
+) -> None:
+    calls = 0
+
+    def invoke(_llm, _prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "PREDICT entities.status FOR EACH entities.entity_id"
+
+    readiness = KumoProviderReadiness(
+        status="unavailable",
+        ready=False,
+        expected_model="kumo-rfm",
+        advertised_models=(),
+        nvidia_sdfm_version="0.2.1",
+        kumorfm_version="2.28.0",
+        error_code="KUMO_PROVIDER_NOT_READY",
+        retryable=retryable,
+    )
+
+    class Model:
+        def validate_pql(self, _query: str) -> None:
+            raise KumoProviderUnavailableError(readiness)
+
+    monkeypatch.setattr(pql_gen, "invoke_text", invoke)
+    result = generate_pql(
+        "Predict entity status",
+        llm=object(),
+        kumo_model=Model(),
+        connector=_UnexpectedConnector(),
+        graph_ddl="entities(entity_id ID, status categorical)  -- PRIMARY KEY (entity_id)",
+        available_entity_ids={"entities": ["entity-1"]},
+        max_tries=3,
+    )
+
+    assert result.success is False
+    assert result.attempts == expected_attempts
+    assert calls == expected_attempts
+    if not retryable:
+        assert "not a forecast" in str(result.error)
 
 
 _NIM_500_ERROR = (
