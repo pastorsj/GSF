@@ -15,6 +15,7 @@ from gsf.retrieval.kumo.predictor import _deduplicate_inferred_links
 from gsf.retrieval.kumo.predictor import _load_relevant_frames
 from gsf.retrieval.kumo.predictor import _validate_connector_contract_views
 from gsf.retrieval.kumo.predictor import build_prediction_context
+from gsf.retrieval.kumo.provider import KumoProviderReadiness
 from nemo_retriever.tabular_data.ingestion.model.reserved_words import TableTypes
 
 
@@ -52,6 +53,42 @@ class _Graph:
 
     def unlink(self, src_table: str, fkey: str, dst_table: str) -> None:
         self.edges.remove(_Edge(src_table, fkey, dst_table))
+
+
+def test_client_initialization_uses_compatibility_registry_only_when_readiness_selects_it() -> None:
+    from gsf.retrieval.kumo import predictor
+
+    readiness = KumoProviderReadiness(
+        status="ready",
+        ready=True,
+        expected_model="kumo-rfm",
+        wire_model="kumo-relational",
+        compatibility_adapter="nvidia-sdfm-0.2.1-kumorfm-2.28.0-relational-model",
+        advertised_models=("kumo-relational",),
+        nvidia_sdfm_version="0.2.1",
+        kumorfm_version="2.28.0",
+    )
+    registry = object()
+    client = object()
+    with (
+        patch.object(predictor, "_client", None),
+        patch.object(predictor, "_provider_failure", None),
+        patch.object(predictor, "_provider_readiness", None),
+        patch.dict(
+            "os.environ",
+            {"KUMO_RFM_API_URL": "https://provider.example.test", "KUMO_RFM_API_KEY": "private-test-key"},
+        ),
+        patch("gsf.retrieval.kumo.predictor.require_kumo_provider_ready", return_value=readiness),
+        patch("gsf.retrieval.kumo.compatibility.compatibility_registry", return_value=registry),
+        patch("nvidia_sdfm.SDFMClient", return_value=client) as client_type,
+    ):
+        assert predictor._ensure_init() is client
+
+    client_type.assert_called_once_with(
+        "https://provider.example.test",
+        api_key="private-test-key",
+        registry=registry,
+    )
 
 
 def test_deduplicate_inferred_links_prefers_destination_primary_key_name() -> None:

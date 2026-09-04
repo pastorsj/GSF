@@ -38,6 +38,7 @@ from langchain_core.language_models import BaseChatModel
 from nemo_retriever.tabular_data.sql_database import SQLDatabase
 
 from gsf.retrieval.kumo.prompts import build_pql_prompt
+from gsf.retrieval.kumo.provider import is_nonrepairable_provider_error
 from gsf.utils.llm_invoke import invoke_text
 
 logger = logging.getLogger(__name__)
@@ -1617,6 +1618,14 @@ def generate_pql(
             prev_pql, prev_error = pql, str(exc)
             result.error = prev_error
             logger.info("PQL attempt %d/%d failed: %s", attempt, max_tries, prev_error[:160])
+            if is_nonrepairable_provider_error(exc):
+                result.error = (
+                    "No prediction was produced because the configured prediction provider could not execute "
+                    "a non-repairable provider or request contract. Any historical structured analysis returned "
+                    "by another work item is not a forecast."
+                )
+                logger.warning("Non-repairable Kumo provider/request contract failure; not regenerating PQL.")
+                break
             if _is_unsupported_shape_error(prev_error):
                 if _is_existence_count_pql(pql):
                     result.error = _friendly_unsupported_message(pql, prev_error)

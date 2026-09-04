@@ -33,6 +33,9 @@ from nemo_retriever.tabular_data.ingestion.model.reserved_words import TableType
 
 from gsf.retrieval.kumo.graph_contract import GraphContract
 from gsf.retrieval.kumo.kumo_model import key_columns
+from gsf.retrieval.kumo.provider import KumoProviderCompatibilityError
+from gsf.retrieval.kumo.provider import KumoProviderReadiness
+from gsf.retrieval.kumo.provider import require_kumo_provider_ready
 
 logger = logging.getLogger(__name__)
 
@@ -51,33 +54,60 @@ _initialized = False
 
 
 _client: Any = None
+_provider_readiness: KumoProviderReadiness | None = None
+_provider_failure: KumoProviderCompatibilityError | None = None
+
+
+def current_provider_readiness() -> KumoProviderReadiness | None:
+    """Return the last successful, credential-free provider readiness proof."""
+
+    return _provider_readiness
 
 
 def _ensure_init() -> Any:
-    """Open the SDFM client once, from env vars, and return it.
+    """Compatibility-check and open the SDFM client once from environment.
 
-    The client is the only supported entry point to the engine: kumorfm refuses
-    direct use. Opening it makes no request, so a bad URL surfaces on the first
-    prediction rather than here.
+    The readiness probe runs before graph upload or prediction. A matching
+    official SDK uses its normal adapter. The one reviewed legacy/current model
+    transition uses a client-local, exact-version adapter; unknown combinations
+    stop as deterministic SDK/NIM incompatibilities.
     """
-    global _client
+    global _client, _provider_failure, _provider_readiness
     if _client is not None:
         return _client
+    if _provider_failure is not None:
+        raise _provider_failure
     with _init_lock:
         if _client is not None:
             return _client
+        if _provider_failure is not None:
+            raise _provider_failure
         url = os.environ.get("KUMO_RFM_API_URL")
         if not url:
             raise RuntimeError("KUMO_RFM_API_URL is not set")
         api_key = os.environ.get("KUMO_RFM_API_KEY") or None
 
+        try:
+            _provider_readiness = require_kumo_provider_ready(url, api_key)
+        except KumoProviderCompatibilityError as exc:
+            # A fixed SDK/server contract mismatch cannot heal within this
+            # process. Cache only that deterministic result; transient health
+            # failures remain retryable on a later request.
+            _provider_failure = exc
+            raise
+
         from nvidia_sdfm import SDFMClient
 
         before = time.perf_counter()
-        _client = SDFMClient(url, api_key=api_key)
+        client_options: dict[str, Any] = {}
+        if _provider_readiness.compatibility_adapter is not None:
+            from gsf.retrieval.kumo.compatibility import compatibility_registry
+
+            client_options["registry"] = compatibility_registry()
+        _client = SDFMClient(url, api_key=api_key, **client_options)
         logger.info(
-            "KumoRFM client opened (url=%s) in %.2fs",
-            url,
+            "KumoRFM client opened after provider compatibility check (model=%s) in %.2fs",
+            _provider_readiness.wire_model or _provider_readiness.expected_model,
             time.perf_counter() - before,
         )
         return _client
