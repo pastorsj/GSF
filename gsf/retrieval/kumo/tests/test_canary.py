@@ -94,5 +94,7 @@ def test_direct_canary_repeats_fixed_population_and_emits_only_typed_proof() -> 
     connector.close.assert_called_once()
     rendered = str(receipt)
     assert "private" not in rendered
+    assert "population_digest" not in rendered
+    assert "ordered_digest" not in rendered
     assert "'value': 53" not in rendered
     assert "'value': 54" not in rendered

@@ -32,6 +32,7 @@ import pandas as pd
 from nemo_retriever.tabular_data.ingestion.model.reserved_words import TableTypes
 
 from gsf.retrieval.kumo.graph_contract import GraphContract
+from gsf.retrieval.kumo.graph_contract import GraphContractPredictionScope
 from gsf.retrieval.kumo.kumo_model import key_columns
 from gsf.retrieval.kumo.provider import KumoProviderCompatibilityError
 from gsf.retrieval.kumo.provider import KumoProviderReadiness
@@ -155,6 +156,13 @@ def _contract_view_sources(
         for table in contract.tables
     }
     resolved: dict[tuple[str, str, str], dict[str, Any]] = {}
+    scope_path = None
+    if contract.prediction_scope is not None:
+        scope_path = (
+            contract.database_name.casefold(),
+            contract.schema_name.casefold(),
+            contract.prediction_scope.population_view.casefold(),
+        )
     for index, entry in enumerate(relevant_tables):
         path = (
             str(entry.get("database_name") or "").strip().casefold(),
@@ -163,6 +171,8 @@ def _contract_view_sources(
         )
         if not all(path):
             raise ValueError(f"Contract catalog source {index} has no exact database/schema/view path.")
+        if path == scope_path:
+            continue
         spec = expected.get(path)
         if spec is None:
             raise ValueError(f"Prediction graph source is outside the governed view contract: {'.'.join(path)}.")
@@ -243,6 +253,8 @@ def _validate_connector_contract_views(
         available_views.add(path)
 
     expected = {(table.schema_name.casefold(), table.name.casefold()) for table in contract.tables}
+    if contract.prediction_scope is not None:
+        expected.add((contract.schema_name.casefold(), contract.prediction_scope.population_view.casefold()))
     ambiguous = expected & duplicate_views
     if ambiguous:
         raise ValueError(f"Prediction connector returned ambiguous governed view(s): {sorted(ambiguous)}.")
@@ -467,6 +479,8 @@ class PredictionContext:
     examples: list[dict[str, Any]]
     database_name: str
     graph_receipt: dict[str, Any]
+    prediction_scope: GraphContractPredictionScope | None = None
+    prediction_scope_ids: tuple[Any, ...] = ()
 
 
 def _fkey_name(fkey: Any) -> str:
@@ -552,6 +566,7 @@ def _build_graph_receipt(
     frames: dict[str, pd.DataFrame],
     examples: list[dict[str, Any]],
     contract: GraphContract | None,
+    prediction_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a credential- and row-free receipt for the applied graph."""
 
@@ -604,6 +619,8 @@ def _build_graph_receipt(
             ),
         ),
     }
+    if prediction_scope is not None:
+        graph_identity["prediction_scope"] = prediction_scope
     digest = hashlib.sha256(
         json.dumps(graph_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -826,6 +843,49 @@ def _entity_ids(graph: Any, frames: dict[str, pd.DataFrame]) -> dict[str, list[A
     return entity_ids
 
 
+def _resolve_prediction_scope(
+    connector: Any,
+    contract: GraphContract,
+    entity_ids: dict[str, list[Any]],
+) -> tuple[tuple[Any, ...], dict[str, Any] | None]:
+    """Load and validate a graph-owned population without exposing its IDs."""
+
+    scope = contract.prediction_scope
+    if scope is None:
+        return (), None
+    result_column = "__gsf_prediction_scope_entity"
+    frame = connector.execute(
+        f'SELECT "{scope.population_column}" AS "{result_column}" '
+        f"FROM {_quote(contract.schema_name, scope.population_view)} "
+        f'ORDER BY "{scope.population_column}"'
+    )
+    if not isinstance(frame, pd.DataFrame) or list(frame.columns) != [result_column]:
+        raise ValueError("Prediction-scope population view returned an invalid column contract.")
+    if len(frame) != scope.population_rows:
+        raise ValueError(f"Prediction-scope population expected {scope.population_rows} rows but loaded {len(frame)}.")
+    if frame.iloc[:, 0].isna().any():
+        raise ValueError("Prediction-scope population contains a null entity identifier.")
+    values = frame.iloc[:, 0].tolist()
+    if frame.iloc[:, 0].duplicated().any():
+        raise ValueError("Prediction-scope population contains duplicate entity identifiers.")
+    available = entity_ids.get(scope.entity_table.casefold())
+    if available is None:
+        raise ValueError("Prediction-scope entity table has no loaded graph identity.")
+    available_set = set(available)
+    if any(value not in available_set for value in values):
+        raise ValueError("Prediction-scope population contains an entity outside the loaded graph.")
+    receipt = {
+        "anchor_time": scope.anchor_time,
+        "anchor_source": "graph_contract",
+        "entity_table": scope.entity_table,
+        "entity_column": scope.entity_column,
+        "population_view": scope.population_view,
+        "population_column": scope.population_column,
+        "population_count": len(values),
+    }
+    return tuple(values), receipt
+
+
 _MAX_CATEGORICAL_VALUES = 12
 _MAX_CATEGORICAL_VALUE_CHARS = 80
 
@@ -978,6 +1038,11 @@ def build_prediction_context(
     graph_ddl, edges, col_stypes, time_columns = build_graph_context(graph)
     kumo_model = KumoModel(client.kumorfm(graph), graph)
     entity_ids = _entity_ids(graph, frames)
+    prediction_scope_ids, prediction_scope_receipt = (
+        _resolve_prediction_scope(selected_connector, graph_contract, entity_ids)
+        if graph_contract is not None
+        else ((), None)
+    )
     column_reference = _categorical_value_reference(frames, col_stypes)
     graph_receipt = _build_graph_receipt(
         database_name=selected_database,
@@ -985,6 +1050,7 @@ def build_prediction_context(
         frames=frames,
         examples=examples or [],
         contract=graph_contract,
+        prediction_scope=prediction_scope_receipt,
     )
 
     # Entity-selection SQL runs against the live GSF database connection (the
@@ -1003,6 +1069,8 @@ def build_prediction_context(
         examples=examples or [],
         database_name=selected_database,
         graph_receipt=graph_receipt,
+        prediction_scope=graph_contract.prediction_scope if graph_contract is not None else None,
+        prediction_scope_ids=prediction_scope_ids,
     )
 
 
@@ -1022,6 +1090,8 @@ def run_prediction(question: str, llm: Any, context: PredictionContext) -> dict[
         time_columns=context.time_columns,
         table_names=context.table_names,
         available_entity_ids=context.entity_ids,
+        prediction_scope=context.prediction_scope,
+        prediction_scope_ids=context.prediction_scope_ids,
         max_entities=_MAX_ENTITIES,
         max_preview_rows=_MAX_PREVIEW_ROWS,
         examples=context.examples,

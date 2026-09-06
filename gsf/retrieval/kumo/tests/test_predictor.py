@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from gsf.retrieval.kumo.graph_contract import GraphContract
 from gsf.retrieval.kumo.graph_contract import GraphContractEdge
+from gsf.retrieval.kumo.graph_contract import GraphContractPredictionScope
 from gsf.retrieval.kumo.graph_contract import GraphContractTable
 from gsf.retrieval.kumo.predictor import PredictionContext
 from gsf.retrieval.kumo.predictor import _build_graph_receipt
@@ -13,6 +14,7 @@ from gsf.retrieval.kumo.predictor import _categorical_value_reference
 from gsf.retrieval.kumo.predictor import _contract_view_sources
 from gsf.retrieval.kumo.predictor import _deduplicate_inferred_links
 from gsf.retrieval.kumo.predictor import _load_relevant_frames
+from gsf.retrieval.kumo.predictor import _resolve_prediction_scope
 from gsf.retrieval.kumo.predictor import _validate_connector_contract_views
 from gsf.retrieval.kumo.predictor import build_prediction_context
 from gsf.retrieval.kumo.provider import KumoProviderReadiness
@@ -155,7 +157,10 @@ class _Connector:
     def execute(self, sql: str) -> pd.DataFrame:
         self.sql.append(sql)
         table = next(name for name in self.frames if f'"{name}"' in sql)
-        return self.frames[table].copy()
+        frame = self.frames[table].copy()
+        if 'AS "__gsf_prediction_scope_entity"' in sql:
+            frame.columns = ["__gsf_prediction_scope_entity"]
+        return frame
 
     def get_tables(self) -> pd.DataFrame:
         return pd.DataFrame(
@@ -179,6 +184,23 @@ def _view_source(table: GraphContractTable, database_name: str) -> dict:
         "pk": list(table.primary_key),
         "expected_rows": table.rows,
     }
+
+
+def _scoped_contract(*, population_rows: int = 2) -> GraphContract:
+    return GraphContract(
+        database_name="prediction_db",
+        tables=(GraphContractTable("entities", "prediction", ("entity_id",), None, 3),),
+        edges=(),
+        revision="sha256:" + "a" * 64,
+        prediction_scope=GraphContractPredictionScope(
+            anchor_time="2026-08-12T00:00:00+00:00",
+            entity_table="entities",
+            entity_column="entity_id",
+            population_view="reviewed_entities",
+            population_column="entity_id",
+            population_rows=population_rows,
+        ),
+    )
 
 
 def test_explicit_contract_refuses_a_configured_partial_row_cap() -> None:
@@ -387,3 +409,103 @@ def test_connector_boundary_rejects_raw_table_at_contracted_view_path() -> None:
 
     with pytest.raises(ValueError, match="missing contracted VIEW"):
         _validate_connector_contract_views(connector, contract)
+
+
+def test_prediction_scope_loads_exact_subset_and_emits_no_entity_ids() -> None:
+    contract = _scoped_contract()
+    connector = _Connector(
+        "prediction_db",
+        {
+            "entities": pd.DataFrame({"entity_id": [1, 2, 3]}),
+            "reviewed_entities": pd.DataFrame({"entity_id": [1, 3]}),
+        },
+    )
+
+    identifiers, receipt = _resolve_prediction_scope(
+        connector,
+        contract,
+        {"entities": [1, 2, 3]},
+    )
+
+    assert identifiers == (1, 3)
+    assert receipt == {
+        "anchor_time": "2026-08-12T00:00:00+00:00",
+        "anchor_source": "graph_contract",
+        "entity_table": "entities",
+        "entity_column": "entity_id",
+        "population_view": "reviewed_entities",
+        "population_column": "entity_id",
+        "population_count": 2,
+    }
+    assert set(receipt) == {
+        "anchor_time",
+        "anchor_source",
+        "entity_table",
+        "entity_column",
+        "population_view",
+        "population_column",
+        "population_count",
+    }
+
+
+def test_prediction_context_carries_validated_scope_into_its_revision_bound_receipt() -> None:
+    contract = _scoped_contract()
+    connector = _Connector(
+        "prediction_db",
+        {
+            "entities": pd.DataFrame({"entity_id": [1, 2, 3]}),
+            "reviewed_entities": pd.DataFrame({"entity_id": [1, 3]}),
+        },
+    )
+    client = MagicMock()
+    client.kumorfm.return_value = object()
+
+    with (
+        patch("gsf.retrieval.kumo.predictor._ensure_init", return_value=client),
+        patch("kumorfm.rfm.Graph.infer_links"),
+    ):
+        context = build_prediction_context(
+            [connector],
+            [_view_source(contract.tables[0], "prediction_db")],
+            database_name="prediction_db",
+            graph_contract=contract,
+        )
+
+    assert context.prediction_scope == contract.prediction_scope
+    assert context.prediction_scope_ids == (1, 3)
+    assert context.graph_receipt["prediction_scope"]["population_count"] == 2
+    assert context.graph_receipt["prediction_scope"]["anchor_source"] == "graph_contract"
+    assert "entity_ids" not in context.graph_receipt["prediction_scope"]
+    assert "population_digest" not in context.graph_receipt["prediction_scope"]
+    assert context.graph_receipt["graph_revision"].startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    ("values", "rows", "message"),
+    [
+        ([1], 2, "expected 2 rows"),
+        ([1, 1], 2, "duplicate"),
+        ([1, 4], 2, "outside the loaded graph"),
+        ([1, None], 2, "null"),
+    ],
+)
+def test_prediction_scope_population_drift_fails_closed(values, rows: int, message: str) -> None:
+    connector = _Connector(
+        "prediction_db",
+        {"reviewed_entities": pd.DataFrame({"entity_id": values})},
+    )
+
+    with pytest.raises(ValueError, match=message):
+        _resolve_prediction_scope(connector, _scoped_contract(population_rows=rows), {"entities": [1, 2, 3]})
+
+
+def test_prediction_scope_view_is_governed_but_not_loaded_into_the_kumo_graph() -> None:
+    contract = _scoped_contract()
+    graph_source = _view_source(contract.tables[0], "prediction_db")
+    population_source = {
+        **graph_source,
+        "name": "reviewed_entities",
+        "expected_rows": 2,
+    }
+
+    assert _contract_view_sources([graph_source, population_source], contract) == [graph_source]
