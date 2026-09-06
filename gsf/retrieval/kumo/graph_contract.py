@@ -24,6 +24,8 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,18 @@ class GraphContractEdge:
 
 
 @dataclass(frozen=True)
+class GraphContractPredictionScope:
+    """One graph-wide temporal anchor and one entity-specific default population."""
+
+    anchor_time: str
+    entity_table: str
+    entity_column: str
+    population_view: str
+    population_column: str
+    population_rows: int
+
+
+@dataclass(frozen=True)
 class GraphContract:
     """The validated contract for one catalog database."""
 
@@ -64,6 +78,7 @@ class GraphContract:
     tables: tuple[GraphContractTable, ...]
     edges: tuple[GraphContractEdge, ...]
     revision: str
+    prediction_scope: GraphContractPredictionScope | None = None
 
     @property
     def schema_name(self) -> str:
@@ -117,6 +132,26 @@ def _nonnegative_int(value: Any, where: str) -> int:
     return value
 
 
+def _positive_int(value: Any, where: str) -> int:
+    result = _nonnegative_int(value, where)
+    if result == 0:
+        raise GraphContractError(f"{where} must be positive")
+    return result
+
+
+def _utc_timestamp(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise GraphContractError(f"{where} must be a timezone-aware ISO-8601 timestamp")
+    candidate = value.strip()
+    try:
+        parsed = datetime.fromisoformat(candidate[:-1] + "+00:00" if candidate.endswith("Z") else candidate)
+    except ValueError as exc:
+        raise GraphContractError(f"{where} must be a timezone-aware ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise GraphContractError(f"{where} must include a timezone offset")
+    return parsed.astimezone(UTC).isoformat()
+
+
 def _sha256(value: Any, where: str) -> str:
     if not isinstance(value, str) or not _SHA256.fullmatch(value):
         raise GraphContractError(f"{where} must be a lowercase SHA-256 digest")
@@ -124,20 +159,23 @@ def _sha256(value: Any, where: str) -> str:
 
 
 def _parse_contract(root: dict[str, Any]) -> GraphContract:
+    root_fields = {
+        "schema_version",
+        "database_name",
+        "database_sha256",
+        "source",
+        "object_count",
+        "row_count",
+        "tables",
+        "relationships",
+        "time_columns",
+        "forbidden_tables",
+    }
+    if "prediction_scope" in root:
+        root_fields.add("prediction_scope")
     _exact_keys(
         root,
-        {
-            "schema_version",
-            "database_name",
-            "database_sha256",
-            "source",
-            "object_count",
-            "row_count",
-            "tables",
-            "relationships",
-            "time_columns",
-            "forbidden_tables",
-        },
+        root_fields,
         "graph contract",
     )
     if root["schema_version"] != 1:
@@ -229,6 +267,51 @@ def _parse_contract(root: dict[str, Any]) -> GraphContract:
     if overlap:
         raise GraphContractError("graph contract includes a forbidden table")
 
+    prediction_scope: GraphContractPredictionScope | None = None
+    if "prediction_scope" in root:
+        raw_scope = root["prediction_scope"]
+        scope = _expect_object(raw_scope, "graph contract.prediction_scope")
+        _exact_keys(
+            scope,
+            {
+                "anchor_time",
+                "entity_table",
+                "entity_column",
+                "population_view",
+                "population_column",
+                "population_rows",
+            },
+            "graph contract.prediction_scope",
+        )
+        entity_table = _name(scope["entity_table"], "graph contract.prediction_scope.entity_table")
+        entity = table_by_name.get(entity_table.casefold())
+        if entity is None:
+            raise GraphContractError("graph contract.prediction_scope.entity_table is not declared")
+        entity_column = _name(scope["entity_column"], "graph contract.prediction_scope.entity_column")
+        if len(entity.primary_key) != 1 or entity.primary_key[0].casefold() != entity_column.casefold():
+            raise GraphContractError(
+                "graph contract.prediction_scope.entity_column must exactly match a single-column entity primary key"
+            )
+        population_view = _name(scope["population_view"], "graph contract.prediction_scope.population_view")
+        if population_view.casefold() in table_by_name:
+            raise GraphContractError("graph contract.prediction_scope.population_view must not be a graph table")
+        if population_view.casefold() in {item.casefold() for item in forbidden}:
+            raise GraphContractError("graph contract.prediction_scope.population_view is forbidden")
+        prediction_scope = GraphContractPredictionScope(
+            anchor_time=_utc_timestamp(scope["anchor_time"], "graph contract.prediction_scope.anchor_time"),
+            entity_table=entity.name,
+            entity_column=entity.primary_key[0],
+            population_view=population_view,
+            population_column=_name(
+                scope["population_column"],
+                "graph contract.prediction_scope.population_column",
+            ),
+            population_rows=_positive_int(
+                scope["population_rows"],
+                "graph contract.prediction_scope.population_rows",
+            ),
+        )
+
     edges: list[GraphContractEdge] = []
     seen_edges: set[tuple[Any, ...]] = set()
     for index, item in enumerate(root["relationships"]):
@@ -292,11 +375,21 @@ def _parse_contract(root: dict[str, Any]) -> GraphContract:
             for edge in edges
         ],
     }
+    if prediction_scope is not None:
+        canonical["prediction_scope"] = {
+            "anchor_time": prediction_scope.anchor_time,
+            "entity_table": prediction_scope.entity_table,
+            "entity_column": prediction_scope.entity_column,
+            "population_view": prediction_scope.population_view,
+            "population_column": prediction_scope.population_column,
+            "population_rows": prediction_scope.population_rows,
+        }
     digest = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return GraphContract(
         database_name=database_name,
         tables=tuple(tables),
         edges=tuple(edges),
+        prediction_scope=prediction_scope,
         revision=f"sha256:{digest}",
     )
 
@@ -383,6 +476,7 @@ __all__ = [
     "GraphContract",
     "GraphContractEdge",
     "GraphContractError",
+    "GraphContractPredictionScope",
     "GraphContractTable",
     "load_graph_contract",
     "load_graph_contracts",

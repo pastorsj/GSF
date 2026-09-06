@@ -1,7 +1,15 @@
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 from gsf.retrieval.kumo import pql_gen
+from gsf.retrieval.kumo.graph_contract import GraphContractPredictionScope
 from gsf.retrieval.kumo.pql_gen import PqlEntitySelectionError
+from gsf.retrieval.kumo.pql_gen import PqlPredictionScopeError
+from gsf.retrieval.kumo.pql_gen import _effective_entity_cap
+from gsf.retrieval.kumo.pql_gen import _effective_entity_ids
+from gsf.retrieval.kumo.pql_gen import _effective_forecast_anchor
+from gsf.retrieval.kumo.pql_gen import _enforce_prediction_entity_boundary
 from gsf.retrieval.kumo.pql_gen import _forecast_anchor
 from gsf.retrieval.kumo.pql_gen import _is_context_capacity_error
 from gsf.retrieval.kumo.pql_gen import _is_context_size_limit_error
@@ -10,10 +18,12 @@ from gsf.retrieval.kumo.pql_gen import _NeighbourhoodMemo
 from gsf.retrieval.kumo.pql_gen import _predict_resilient
 from gsf.retrieval.kumo.pql_gen import _resolve_indices
 from gsf.retrieval.kumo.pql_gen import _retry_at_full_neighbourhood
+from gsf.retrieval.kumo.pql_gen import _validate_prediction_scope_ids
 from gsf.retrieval.kumo.pql_gen import canonicalize_pql_identifiers
 from gsf.retrieval.kumo.pql_gen import extract_pql
 from gsf.retrieval.kumo.pql_gen import generate_pql
 from gsf.retrieval.kumo.pql_gen import parse_entity
+from gsf.retrieval.kumo.pql_gen import predict_all
 from gsf.retrieval.kumo.provider import KumoProviderCompatibilityError
 from gsf.retrieval.kumo.provider import KumoProviderReadiness
 from gsf.retrieval.kumo.provider import KumoProviderUnavailableError
@@ -50,6 +60,22 @@ class _MaxTimestampConnector:
 
     def execute(self, _sql: str) -> pd.DataFrame:
         return pd.DataFrame({"m": [self.value]})
+
+
+def _prediction_scope(
+    *,
+    entity_table: str = "entities",
+    entity_column: str = "entity_id",
+    population_rows: int = 2,
+) -> GraphContractPredictionScope:
+    return GraphContractPredictionScope(
+        anchor_time="2026-08-12T00:00:00+00:00",
+        entity_table=entity_table,
+        entity_column=entity_column,
+        population_view="reviewed_entities",
+        population_column=entity_column,
+        population_rows=population_rows,
+    )
 
 
 def test_extract_pql_ignores_predict_in_explanatory_prose() -> None:
@@ -125,6 +151,236 @@ def test_resolve_indices_does_not_turn_an_empty_explicit_scope_into_predict_all(
         )
 
 
+def test_resolve_indices_deduplicates_explicit_sql_in_first_seen_order() -> None:
+    class Connector:
+        def execute(self, _sql: str) -> pd.DataFrame:
+            return pd.DataFrame({"entity_id": ["entity-3", "entity-1", "entity-3", "entity-2", "entity-1"]})
+
+    assert _resolve_indices(
+        "PREDICT entities.status FOR EACH entities.entity_id",
+        "SELECT entity_id FROM entities",
+        Connector(),
+        10,
+        available_entity_ids={"entities": ["entity-1", "entity-3"]},
+    ) == ["entity-3", "entity-1"]
+
+
+@pytest.mark.parametrize(
+    ("prediction_scope_ids", "available_entity_ids", "message"),
+    [
+        ((), {"entities": ["entity-1", "entity-2", "entity-3"]}, "missing or empty"),
+        (("entity-1",), {"entities": ["entity-1", "entity-2", "entity-3"]}, "count does not match"),
+        (
+            ("entity-1", "entity-1"),
+            {"entities": ["entity-1", "entity-2", "entity-3"]},
+            "duplicates",
+        ),
+        (
+            ("entity-1", None),
+            {"entities": ["entity-1", "entity-2", "entity-3"]},
+            "missing value",
+        ),
+        (
+            ("entity-1", "outside"),
+            {"entities": ["entity-1", "entity-2", "entity-3"]},
+            "outside the loaded graph",
+        ),
+        (("entity-1", "entity-3"), None, "requires loaded graph"),
+        (("entity-1", "entity-3"), {"entities": []}, "missing or empty in the loaded graph"),
+        (
+            ("entity-1", "entity-3"),
+            {"entities": ["entity-1", "entity-1", "entity-3"]},
+            "Loaded graph entity identifiers contain duplicates",
+        ),
+    ],
+)
+def test_prediction_scope_handoff_rejects_invalid_identifiers(
+    prediction_scope_ids: tuple[object, ...],
+    available_entity_ids: dict[str, list[object]] | None,
+    message: str,
+) -> None:
+    with pytest.raises(PqlPredictionScopeError, match=message):
+        _validate_prediction_scope_ids(
+            _prediction_scope(),
+            prediction_scope_ids,
+            available_entity_ids,
+        )
+
+
+def test_predict_all_rejects_empty_scope_before_provider_execution() -> None:
+    class Model:
+        def predict(self, *_args, **_kwargs):
+            raise AssertionError("provider must not be called")
+
+    with pytest.raises(PqlPredictionScopeError, match="missing or empty"):
+        predict_all(
+            "PREDICT entities.status FOR EACH entities.entity_id",
+            kumo_model=Model(),
+            connector=_UnexpectedConnector(),
+            available_entity_ids={"entities": ["entity-1", "entity-2"]},
+            prediction_scope=_prediction_scope(),
+            prediction_scope_ids=(),
+        )
+
+
+def test_generate_pql_rejects_out_of_graph_scope_before_llm_or_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pql_gen,
+        "invoke_text",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("LLM must not be called")),
+    )
+
+    with pytest.raises(PqlPredictionScopeError, match="outside the loaded graph"):
+        generate_pql(
+            "Predict entity status",
+            llm=object(),
+            kumo_model=object(),
+            connector=_UnexpectedConnector(),
+            graph_ddl="entities(entity_id ID, status categorical)  -- PRIMARY KEY (entity_id)",
+            available_entity_ids={"entities": ["entity-1", "entity-2"]},
+            prediction_scope=_prediction_scope(),
+            prediction_scope_ids=("entity-1", "outside"),
+        )
+
+
+def test_predict_all_keeps_legacy_unscoped_entity_resolution() -> None:
+    class Connector:
+        def execute(self, _sql: str) -> pd.DataFrame:
+            return pd.DataFrame({"entity_id": ["entity-1", "entity-2"]})
+
+    class Model:
+        def __init__(self) -> None:
+            self.indices = None
+
+        def predict(self, _query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
+            self.indices = indices
+            return pd.DataFrame({"ENTITY": indices, "STATUS_PRED": [0.4, 0.6]})
+
+    model = Model()
+    predict_all(
+        "PREDICT entities.status FOR EACH entities.entity_id",
+        kumo_model=model,
+        connector=Connector(),
+    )
+
+    assert model.indices == ["entity-1", "entity-2"]
+
+
+def test_predict_all_executes_full_governed_scope_with_existing_batching() -> None:
+    entity_ids = list(range(2_001))
+
+    class Model:
+        def __init__(self) -> None:
+            self.batches: list[list[int]] = []
+
+        def predict(self, _query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
+            assert indices is not None
+            self.batches.append(indices)
+            return pd.DataFrame({"ENTITY": indices, "STATUS_PRED": [0.5] * len(indices)})
+
+    model = Model()
+    result = predict_all(
+        "PREDICT entities.status FOR EACH entities.entity_id",
+        kumo_model=model,
+        connector=_UnexpectedConnector(),
+        max_entities=10,
+        available_entity_ids={"entities": entity_ids},
+        prediction_scope=_prediction_scope(population_rows=len(entity_ids)),
+        prediction_scope_ids=tuple(entity_ids),
+    )
+
+    assert [len(batch) for batch in model.batches] == [1_000, 1_000, 1]
+    assert len(result) == len(entity_ids)
+
+
+def test_predict_all_rejects_provider_entity_outside_requested_scope() -> None:
+    class Model:
+        def predict(self, _query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
+            return pd.DataFrame({"ENTITY": [indices[0], "outside"], "STATUS_PRED": [0.5, 0.9]})
+
+    with pytest.raises(PqlPredictionScopeError, match="outside the requested graph-backed scope"):
+        predict_all(
+            "PREDICT entities.status FOR EACH entities.entity_id",
+            kumo_model=Model(),
+            connector=_UnexpectedConnector(),
+            available_entity_ids={"entities": ["entity-1", "entity-2"]},
+            prediction_scope=_prediction_scope(),
+            prediction_scope_ids=("entity-1", "entity-2"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("pql", "frame"),
+    [
+        (
+            "PREDICT SUM(events.value, 0, 7, days) FORECAST 2 TIMEFRAMES FOR EACH entities.entity_id",
+            pd.DataFrame(
+                {
+                    "ENTITY": ["entity-1", "entity-1"],
+                    "TIME": ["2026-08-19", "2026-08-26"],
+                    "TARGET_PRED": [1.0, 2.0],
+                }
+            ),
+        ),
+        (
+            "PREDICT LIST_DISTINCT(events.item_id, 0, 7, days) RANK TOP 2 FOR EACH entities.entity_id",
+            pd.DataFrame(
+                {
+                    "ENTITY": ["entity-1", "entity-1", "entity-2", "entity-2"],
+                    "CLASS": ["item-1", "item-2", "item-2", "item-3"],
+                    "PROBABILITY": [0.8, 0.7, 0.9, 0.6],
+                }
+            ),
+        ),
+    ],
+)
+def test_provider_boundary_allows_repeated_forecast_and_link_rows(pql: str, frame: pd.DataFrame) -> None:
+    _enforce_prediction_entity_boundary(frame, ["entity-1", "entity-2"], pql=pql)
+
+
+def test_provider_boundary_matches_sdk_composite_rendering_but_keeps_single_keys_typed() -> None:
+    composite = pd.DataFrame(
+        {
+            "account_id": ["1", "true"],
+            "region": ["West", "East"],
+            "TRUE_PROB": [0.8, 0.7],
+        }
+    )
+    _enforce_prediction_entity_boundary(
+        composite,
+        [(1, "West"), (True, "East")],
+        pql="PREDICT accounts.risk FOR EACH accounts.account_id",
+    )
+
+    with pytest.raises(PqlPredictionScopeError, match="outside the requested graph-backed scope"):
+        _enforce_prediction_entity_boundary(
+            pd.DataFrame({"ENTITY": ["1"], "TRUE_PROB": [0.8]}),
+            [1],
+            pql="PREDICT accounts.risk FOR EACH accounts.account_id",
+        )
+
+
+def test_matching_governed_scope_above_graph_cap_fails_closed() -> None:
+    with pytest.raises(PqlPredictionScopeError, match="above the 10000-entity graph execution limit"):
+        _effective_entity_cap(
+            "PREDICT entities.status FOR EACH entities.entity_id",
+            10,
+            _prediction_scope(population_rows=10_001),
+        )
+
+
+def test_scoped_nonmatching_entity_cannot_fall_back_to_source_database() -> None:
+    with pytest.raises(PqlPredictionScopeError, match="inventory is missing or empty"):
+        predict_all(
+            "PREDICT other_entities.status FOR EACH other_entities.other_id",
+            kumo_model=object(),
+            connector=_UnexpectedConnector(),
+            available_entity_ids={"entities": ["entity-1", "entity-2"]},
+            prediction_scope=_prediction_scope(),
+            prediction_scope_ids=("entity-1", "entity-2"),
+        )
+
+
 def test_generate_pql_repairs_empty_entity_sql_without_calling_predict_with_none(monkeypatch) -> None:
     responses = iter(
         [
@@ -193,6 +449,97 @@ SELECT entity_id FROM entities WHERE lifecycle_status = 'Active'
     assert "entity-selection SQL matched zero graph-backed rows" in prompts[1]
 
 
+def test_generate_pql_explain_requires_entity_correlated_prediction_frame(monkeypatch) -> None:
+    pql = "PREDICT entities.status FOR EACH entities.entity_id"
+    monkeypatch.setattr(pql_gen, "invoke_text", lambda *_args: pql)
+
+    class Model:
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, *, indices=None, **_kwargs):
+            assert indices == ["entity-1"]
+            return SimpleNamespace(summary="Narrative without a prediction frame", prediction=None)
+
+    result = generate_pql(
+        "Explain the entity's predicted status",
+        llm=object(),
+        kumo_model=Model(),
+        connector=_UnexpectedConnector(),
+        graph_ddl="entities(entity_id ID, status categorical)  -- PRIMARY KEY (entity_id)",
+        available_entity_ids={"entities": ["entity-1"]},
+        explain=True,
+        explain_entity="entity-1",
+        max_tries=1,
+    )
+
+    assert not result.success
+    assert result.error == "Prediction provider returned an invalid result shape."
+
+
+def test_generate_pql_explain_accepts_requested_entity_prediction_frame(monkeypatch) -> None:
+    pql = "PREDICT entities.status FOR EACH entities.entity_id"
+    monkeypatch.setattr(pql_gen, "invoke_text", lambda *_args: pql)
+
+    class Model:
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, *, indices=None, **_kwargs):
+            assert indices == ["entity-1"]
+            return SimpleNamespace(
+                summary="Entity-correlated explanation",
+                prediction=pd.DataFrame({"ENTITY": ["entity-1"], "STATUS_PRED": [0.75]}),
+            )
+
+    result = generate_pql(
+        "Explain the entity's predicted status",
+        llm=object(),
+        kumo_model=Model(),
+        connector=_UnexpectedConnector(),
+        graph_ddl="entities(entity_id ID, status categorical)  -- PRIMARY KEY (entity_id)",
+        available_entity_ids={"entities": ["entity-1"]},
+        explain=True,
+        explain_entity="entity-1",
+        max_tries=1,
+    )
+
+    assert result.success
+    assert result.explanation == "Entity-correlated explanation"
+    assert result.rows == [{"ENTITY": "entity-1", "STATUS_PRED": 0.75}]
+
+
+def test_generate_pql_explain_rejects_empty_entity_prediction_frame(monkeypatch) -> None:
+    pql = "PREDICT entities.status FOR EACH entities.entity_id"
+    monkeypatch.setattr(pql_gen, "invoke_text", lambda *_args: pql)
+
+    class Model:
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, *, indices=None, **_kwargs):
+            assert indices == ["entity-1"]
+            return SimpleNamespace(
+                summary="Narrative without a correlated result row",
+                prediction=pd.DataFrame(columns=["ENTITY", "STATUS_PRED"]),
+            )
+
+    result = generate_pql(
+        "Explain the entity's predicted status",
+        llm=object(),
+        kumo_model=Model(),
+        connector=_UnexpectedConnector(),
+        graph_ddl="entities(entity_id ID, status categorical)  -- PRIMARY KEY (entity_id)",
+        available_entity_ids={"entities": ["entity-1"]},
+        explain=True,
+        explain_entity="entity-1",
+        max_tries=1,
+    )
+
+    assert not result.success
+    assert result.error == "Prediction provider returned no entity-correlated explanation rows."
+
+
 def test_forecast_anchor_inherits_timezone_from_aware_source_column() -> None:
     anchor = _forecast_anchor(
         "PREDICT COUNT(events.*, 0, 60, days) > 0 FOR EACH entities.entity_id",
@@ -226,6 +573,270 @@ def test_forecast_anchor_converts_aware_now_to_source_timezone() -> None:
     )
 
     assert anchor == pd.Timestamp("2026-08-31T00:00:00Z")
+
+
+def test_matching_graph_scope_replaces_data_max_anchor_and_constrains_entities(monkeypatch) -> None:
+    pql = "PREDICT COUNT(events.*, 0, 30, minutes) > 0 FOR EACH entities.entity_id"
+    monkeypatch.setattr(pql_gen, "invoke_text", lambda *_args: pql)
+
+    class Model:
+        def __init__(self) -> None:
+            self.call: dict = {}
+
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, **kwargs) -> pd.DataFrame:
+            self.call = kwargs
+            return pd.DataFrame({"ENTITY": kwargs["indices"], "TRUE_PROB": [0.7, 0.8]})
+
+    model = Model()
+    result = generate_pql(
+        "Which entities are likely to have events?",
+        llm=object(),
+        kumo_model=model,
+        connector=_UnexpectedConnector(),
+        graph_ddl=(
+            "entities(entity_id ID)  -- PRIMARY KEY (entity_id)\n"
+            "events(event_id ID, entity_id ID, observed_at timestamp)  -- PRIMARY KEY (event_id)"
+        ),
+        graph_edges=[("events", "entity_id", "entities")],
+        time_columns={"events": "observed_at"},
+        available_entity_ids={"entities": ["entity-1", "entity-2", "entity-3"]},
+        prediction_scope=_prediction_scope(),
+        prediction_scope_ids=("entity-1", "entity-3"),
+    )
+
+    assert result.success
+    assert model.call["indices"] == ["entity-1", "entity-3"]
+    assert model.call["anchor_time"] == pd.Timestamp("2026-08-12T00:00:00Z")
+
+
+def test_graph_scope_never_broadens_an_explicit_entity_selection() -> None:
+    pql = "PREDICT events.outcome FOR EACH entities.entity_id"
+    available = _effective_entity_ids(
+        pql,
+        {"entities": ["entity-1", "entity-2", "entity-3"]},
+        _prediction_scope(),
+        ("entity-1", "entity-3"),
+    )
+
+    class Connector:
+        def execute(self, _sql: str) -> pd.DataFrame:
+            return pd.DataFrame({"entity_id": ["entity-1", "entity-2"]})
+
+    assert _resolve_indices(
+        pql,
+        "SELECT entity_id FROM entities",
+        Connector(),
+        10,
+        available_entity_ids=available,
+    ) == ["entity-1"]
+
+
+def test_group_by_preserves_entity_sql_and_intersects_governed_population(monkeypatch) -> None:
+    response = """```pql
+PREDICT entities.risk_score FOR EACH entities.entity_id
+```
+```sql
+SELECT entity_id FROM entities WHERE review_tier = 'priority'
+```"""
+    monkeypatch.setattr(pql_gen, "invoke_text", lambda *_args: response)
+
+    class Connector:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def execute(self, sql: str) -> pd.DataFrame:
+            self.queries.append(sql)
+            if "review_tier" in sql:
+                return pd.DataFrame({"entity_id": ["entity-1", "entity-2"]})
+            if '"region"' in sql:
+                return pd.DataFrame(
+                    {
+                        "entity_id": ["entity-1", "entity-2", "entity-3"],
+                        "region": ["east", "west", "east"],
+                    }
+                )
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    class Model:
+        def __init__(self) -> None:
+            self.indices = None
+
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
+            self.indices = indices
+            return pd.DataFrame({"ENTITY": indices, "RISK_PRED": [0.8]})
+
+    connector = Connector()
+    model = Model()
+    result = generate_pql(
+        "Show priority entity risk by region",
+        llm=object(),
+        kumo_model=model,
+        connector=connector,
+        graph_ddl=(
+            "entities(entity_id ID, risk_score float, review_tier categorical, region categorical)"
+            "  -- PRIMARY KEY (entity_id)"
+        ),
+        group_by="region",
+        available_entity_ids={"entities": ["entity-1", "entity-2", "entity-3"]},
+        prediction_scope=_prediction_scope(),
+        prediction_scope_ids=("entity-1", "entity-3"),
+    )
+
+    assert result.success
+    assert result.entity_sql == "SELECT entity_id FROM entities WHERE review_tier = 'priority'"
+    assert result.note is None
+    assert model.indices == ["entity-1"]
+    assert result.num_entities == 1
+    assert result.rows == [{"region": "east", "total": 0.8, "average": 0.8, "n_entities": 1}]
+    assert "review_tier" in connector.queries[0]
+
+
+def test_group_by_rejects_provider_entity_outside_intersected_population(monkeypatch) -> None:
+    response = """```pql
+PREDICT entities.risk_score FOR EACH entities.entity_id
+```
+```sql
+SELECT entity_id FROM entities WHERE review_tier = 'priority'
+```"""
+    monkeypatch.setattr(pql_gen, "invoke_text", lambda *_args: response)
+
+    class Connector:
+        def execute(self, sql: str) -> pd.DataFrame:
+            if "review_tier" in sql:
+                return pd.DataFrame({"entity_id": ["entity-1", "entity-2"]})
+            raise AssertionError("group lookup must not run after an out-of-scope provider result")
+
+    class Model:
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
+            assert indices == ["entity-1"]
+            return pd.DataFrame({"ENTITY": ["entity-2"], "RISK_PRED": [0.8]})
+
+    result = generate_pql(
+        "Show priority entity risk by region",
+        llm=object(),
+        kumo_model=Model(),
+        connector=Connector(),
+        graph_ddl=(
+            "entities(entity_id ID, risk_score float, review_tier categorical, region categorical)"
+            "  -- PRIMARY KEY (entity_id)"
+        ),
+        group_by="region",
+        available_entity_ids={"entities": ["entity-1", "entity-2", "entity-3"]},
+        prediction_scope=_prediction_scope(),
+        prediction_scope_ids=("entity-1", "entity-3"),
+    )
+
+    assert not result.success
+    assert result.error is not None
+    assert "outside the requested graph-backed scope" in result.error
+
+
+@pytest.mark.parametrize(
+    ("pql", "available_entity_ids", "time_columns"),
+    [
+        (
+            "PREDICT COUNT(publication_events.*, 0, 182, days) FOR EACH author_entities.author_id",
+            {"author_entities": ["author-1", "author-2", "author-3"]},
+            {"publication_events": "published_at"},
+        ),
+        (
+            "PREDICT COUNT(tool_excursion_events.*, 0, 14, days) > 0 FOR EACH tool_entities.tool_id",
+            {"tool_entities": ["tool-1", "tool-2", "tool-3"]},
+            {"tool_excursion_events": "event_at"},
+        ),
+    ],
+)
+def test_graph_anchor_applies_to_a_different_entity_without_scoping_its_population(
+    pql: str,
+    available_entity_ids: dict[str, list[str]],
+    time_columns: dict[str, str],
+) -> None:
+    anchor = _effective_forecast_anchor(
+        pql,
+        _UnexpectedConnector(),
+        time_columns,
+        table_names=None,
+        prediction_scope=_prediction_scope(),
+    )
+
+    assert anchor == pd.Timestamp(_prediction_scope().anchor_time)
+    assert (
+        _effective_entity_ids(
+            pql,
+            available_entity_ids,
+            _prediction_scope(),
+            ("entity-1", "entity-3"),
+        )
+        == available_entity_ids
+    )
+
+
+def test_graph_anchor_applies_to_nonmatching_entity_in_generate_pql(monkeypatch) -> None:
+    pql = "PREDICT COUNT(publication_events.*, 0, 182, days) FOR EACH author_entities.author_id"
+    monkeypatch.setattr(pql_gen, "invoke_text", lambda *_args: pql)
+
+    class Model:
+        def __init__(self) -> None:
+            self.call: dict = {}
+
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, **kwargs) -> pd.DataFrame:
+            self.call = kwargs
+            return pd.DataFrame({"ENTITY": kwargs["indices"], "COUNT_PRED": [1.0, 2.0, 3.0]})
+
+    model = Model()
+    paper_scope = _prediction_scope(
+        entity_table="paper_entities",
+        entity_column="paper_id",
+    )
+    result = generate_pql(
+        "How many papers is each reviewed author likely to publish?",
+        llm=object(),
+        kumo_model=model,
+        connector=_UnexpectedConnector(),
+        graph_ddl=(
+            "paper_entities(paper_id ID)  -- PRIMARY KEY (paper_id)\n"
+            "author_entities(author_id ID)  -- PRIMARY KEY (author_id)\n"
+            "publication_events(publication_id ID, author_id ID, published_at timestamp)"
+            "  -- PRIMARY KEY (publication_id)"
+        ),
+        graph_edges=[("publication_events", "author_id", "author_entities")],
+        time_columns={"publication_events": "published_at"},
+        available_entity_ids={
+            "paper_entities": ["paper-1", "paper-2", "paper-3"],
+            "author_entities": ["author-1", "author-2", "author-3"],
+        },
+        prediction_scope=paper_scope,
+        prediction_scope_ids=("paper-1", "paper-3"),
+    )
+
+    assert result.success
+    assert model.call["anchor_time"] == pd.Timestamp(paper_scope.anchor_time)
+    assert model.call["indices"] == ["author-1", "author-2", "author-3"]
+
+
+def test_graph_anchor_is_not_attached_to_a_non_temporal_prediction() -> None:
+    assert (
+        _effective_forecast_anchor(
+            "PREDICT entities.status FOR EACH entities.entity_id",
+            _UnexpectedConnector(),
+            {"events": "observed_at"},
+            table_names=None,
+            prediction_scope=_prediction_scope(),
+        )
+        is None
+    )
 
 
 def test_row_limit_rejection_is_a_context_capacity_error() -> None:

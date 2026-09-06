@@ -53,18 +53,10 @@ def _typed_value(value: Any) -> dict[str, Any]:
     return {"type": kind, "value": value}
 
 
-def _population_digest(values: Sequence[Any], *, ordered: bool) -> str:
-    encoded = [_typed_value(value) for value in values]
-    if not ordered:
-        encoded.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
-    return "sha256:" + hashlib.sha256(json.dumps(encoded, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
 def _population_receipt(values: Sequence[Any]) -> dict[str, Any]:
     types = Counter(_typed_value(value)["type"] for value in values)
     return {
         "count": len(values),
-        "ordered_digest": _population_digest(values, ordered=True),
         "type_counts": dict(sorted(types.items())),
     }
 
@@ -81,7 +73,7 @@ def _timestamp(value: Any) -> pd.Timestamp:
 def _safe_graph_receipt(value: dict[str, Any]) -> dict[str, Any]:
     tables = value.get("tables") if isinstance(value.get("tables"), list) else []
     edges = value.get("edges") if isinstance(value.get("edges"), list) else []
-    return {
+    receipt = {
         "schema_version": value.get("schema_version"),
         "mode": value.get("mode"),
         "database_name": value.get("database_name"),
@@ -109,6 +101,21 @@ def _safe_graph_receipt(value: dict[str, Any]) -> dict[str, Any]:
             if isinstance(edge, dict)
         ],
     }
+    scope = value.get("prediction_scope")
+    if isinstance(scope, dict):
+        receipt["prediction_scope"] = {
+            key: scope.get(key)
+            for key in (
+                "anchor_time",
+                "anchor_source",
+                "entity_table",
+                "entity_column",
+                "population_view",
+                "population_column",
+                "population_count",
+            )
+        }
+    return receipt
 
 
 def _catalog_sources(contract: GraphContract) -> list[dict[str, Any]]:
@@ -161,7 +168,6 @@ def _result_receipt(
         "passed": True,
         "row_count": len(frame),
         "columns": [{"name": str(column), "dtype": str(frame[column].dtype)} for column in frame.columns],
-        "population_digest": _population_digest(returned, ordered=False),
         "score": {
             "column": resolved_score,
             "finite": True,
@@ -194,7 +200,8 @@ def run_canary(
         raise ValueError(f"entities must contain 1 through {_MAX_ENTITIES} values")
     if any(isinstance(value, bool) or not isinstance(value, (str, int)) for value in entities):
         raise ValueError("entities must contain only strings or integers")
-    if len({_population_digest([value], ordered=True) for value in entities}) != len(entities):
+    typed_entities = {json.dumps(_typed_value(value), sort_keys=True, separators=(",", ":")) for value in entities}
+    if len(typed_entities) != len(entities):
         raise ValueError("entities must be unique with type preserved")
     if not 1 <= repetitions <= _MAX_REPETITIONS:
         raise ValueError(f"repetitions must be from 1 through {_MAX_REPETITIONS}")

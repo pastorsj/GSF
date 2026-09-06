@@ -7,6 +7,7 @@ from copy import deepcopy
 
 import pytest
 from gsf.retrieval.kumo.graph_contract import GraphContractError
+from gsf.retrieval.kumo.graph_contract import __all__ as graph_contract_exports
 from gsf.retrieval.kumo.graph_contract import load_graph_contract
 
 
@@ -53,6 +54,21 @@ def _document() -> dict:
     }
 
 
+def _scope() -> dict:
+    return {
+        "anchor_time": "2026-08-12T00:00:00-04:00",
+        "entity_table": "entities",
+        "entity_column": "entity_id",
+        "population_view": "reviewed_entities",
+        "population_column": "entity_id",
+        "population_rows": 2,
+    }
+
+
+def test_prediction_scope_type_is_publicly_exported() -> None:
+    assert "GraphContractPredictionScope" in graph_contract_exports
+
+
 def test_unconfigured_contract_file_disables_contract_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KUMO_GRAPH_CONTRACTS_FILE", raising=False)
 
@@ -73,8 +89,29 @@ def test_loads_exact_database_contract_with_stable_revision(tmp_path) -> None:
     assert first.tables[0].time_column is None
     assert first.tables[1].time_column == "recorded_at"
     assert first.edges[0].source_columns == ("entity_id",)
-    assert first.revision.startswith("sha256:")
+    assert first.revision == "sha256:cba9a65c9e4d8c54743e56954671d2f56b07ca44a7d5884b864be3c2f55f8f06"
     assert first.revision == second.revision
+    assert first.prediction_scope is None
+
+
+def test_optional_prediction_scope_is_strict_canonical_and_revision_bound(tmp_path) -> None:
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(json.dumps(_document()), encoding="utf-8")
+    document = _document()
+    document["prediction_scope"] = _scope()
+    scoped_path = tmp_path / "scoped.json"
+    scoped_path.write_text(json.dumps(document), encoding="utf-8")
+
+    legacy = load_graph_contract("prediction_db", path=legacy_path)
+    scoped = load_graph_contract("prediction_db", path=scoped_path)
+
+    assert legacy is not None
+    assert scoped is not None
+    assert scoped.revision != legacy.revision
+    assert scoped.prediction_scope is not None
+    assert scoped.prediction_scope.anchor_time == "2026-08-12T04:00:00+00:00"
+    assert scoped.prediction_scope.entity_table == "entities"
+    assert scoped.prediction_scope.population_view == "reviewed_entities"
 
 
 def test_valid_file_can_omit_selected_database(tmp_path) -> None:
@@ -146,6 +183,39 @@ def test_bundle_rejects_duplicate_database_names(tmp_path) -> None:
 def test_invalid_contracts_fail_closed(tmp_path, mutate) -> None:
     document = _document()
     mutate(document)
+    path = tmp_path / "contracts.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(GraphContractError):
+        load_graph_contract("prediction_db", path=path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda scope: scope.update({"unknown": True}),
+        lambda scope: scope.update({"anchor_time": "2026-08-12T00:00:00"}),
+        lambda scope: scope.update({"entity_table": "missing"}),
+        lambda scope: scope.update({"entity_column": "wrong_id"}),
+        lambda scope: scope.update({"population_view": "entities"}),
+        lambda scope: scope.update({"population_view": "future_labels"}),
+        lambda scope: scope.update({"population_rows": 0}),
+    ],
+)
+def test_invalid_prediction_scopes_fail_closed(tmp_path, mutate) -> None:
+    document = _document()
+    document["prediction_scope"] = _scope()
+    mutate(document["prediction_scope"])
+    path = tmp_path / "contracts.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(GraphContractError):
+        load_graph_contract("prediction_db", path=path)
+
+
+def test_null_prediction_scope_fails_closed(tmp_path) -> None:
+    document = _document()
+    document["prediction_scope"] = None
     path = tmp_path / "contracts.json"
     path.write_text(json.dumps(document), encoding="utf-8")
 
