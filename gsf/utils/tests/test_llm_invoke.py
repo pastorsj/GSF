@@ -9,7 +9,10 @@ import threading
 import time
 from typing import Any
 
+import pytest
+
 from gsf.utils import llm_invoke
+from gsf.utils.llm_invoke import _positive_float_env
 from gsf.utils.llm_invoke import _structured_output_kwargs
 
 
@@ -59,6 +62,22 @@ def test_a_client_exposing_model_instead_of_model_name_still_matches() -> None:
         model: Any = "aws/anthropic/bedrock-claude-opus-4-8"
 
     assert _structured_output_kwargs(_AltModel())["tool_choice"] is None
+
+
+def test_positive_float_env_accepts_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_TIMEOUT_SECONDS", "120.5")
+
+    assert _positive_float_env("TEST_TIMEOUT_SECONDS", 50) == 120.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "invalid"])
+def test_positive_float_env_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("TEST_TIMEOUT_SECONDS", value)
+
+    with pytest.raises(RuntimeError, match="must be a positive finite number"):
+        _positive_float_env("TEST_TIMEOUT_SECONDS", 50)
 
 
 def _bound() -> int | None:
