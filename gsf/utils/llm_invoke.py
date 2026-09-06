@@ -5,23 +5,41 @@
 """LLM client construction and structured-output invocation wrappers."""
 
 import logging
+import math
 import os
 import random
 import threading
 import time
-from typing import Type, TypeVar
+from typing import Type
+from typing import TypeVar
 
 import requests as _requests
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel, ValidationError
+from langchain_core.messages import BaseMessage
+from langchain_core.messages import HumanMessage
+from langchain_core.messages import SystemMessage
+from pydantic import BaseModel
+from pydantic import ValidationError
 
 from gsf.utils.model_config import resolve
 
 logger = logging.getLogger(__name__)
 
 RETRY_MAX_ATTEMPTS = 3
-LLM_INVOKE_TIMEOUT_S = 50
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise RuntimeError(f"{name} must be a positive finite number")
+    return value
+
+
+LLM_INVOKE_TIMEOUT_S = _positive_float_env("LLM_INVOKE_TIMEOUT_S", 50)
 
 # Bound total concurrent LLM requests across all worker threads so the pipeline's
 # nested parallelism (tables × terms) doesn't saturate the hosted endpoint's
@@ -264,17 +282,14 @@ def safe_invoke_with_structured_output(
                 )
                 continue
             else:
-                logger.error(
-                    f"Validation failed after {RETRY_MAX_ATTEMPTS} attempts for {schema_name}"
-                )
+                logger.error(f"Validation failed after {RETRY_MAX_ATTEMPTS} attempts for {schema_name}")
                 raise
         except Exception as e:
             is_retryable = any(tok in str(e) for tok in _RETRYABLE_TOKENS)
             if is_retryable and attempt < RETRY_MAX_ATTEMPTS - 1:
                 wait = 2 ** (attempt + 1) + random.uniform(0, 1)
                 logger.warning(
-                    "Retryable LLM error (endpoint saturated/rate-limited) on attempt "
-                    "%d/%d for %s — retrying in %.1fs",
+                    "Retryable LLM error (endpoint saturated/rate-limited) on attempt %d/%d for %s — retrying in %.1fs",
                     attempt + 1,
                     RETRY_MAX_ATTEMPTS,
                     schema_name,
