@@ -1160,6 +1160,122 @@ def test_static_lint_accepts_a_quoted_event_table_that_links_to_the_entity() -> 
         )
 
 
+@pytest.mark.parametrize("operator", [">=", "<="])
+@pytest.mark.parametrize("date_literal", ["'2026-08-20'", "2026-08-20"])
+def test_static_lint_moves_temporal_entity_bounds_to_selection_sql(
+    operator: str, date_literal: str
+) -> None:
+    pql = (
+        "PREDICT COUNT(receipts.*, 0, 30, days) > 0 "
+        "FOR EACH orders.order_id WHERE "
+        f"orders.promised_date {operator} {date_literal}"
+    )
+
+    with pytest.raises(pql_gen.PqlStaticError, match="SEPARATE entity-selection"):
+        pql_gen.validate_pql_static(
+            pql,
+            col_stypes={"orders": {"promised_date": "timestamp"}},
+        )
+
+
+def test_static_lint_keeps_non_temporal_entity_comparisons() -> None:
+    pql_gen.validate_pql_static(
+        "PREDICT COUNT(receipts.*, 0, 30, days) > 0 "
+        "FOR EACH orders.order_id WHERE "
+        "orders.status = 'Open' AND orders.priority >= 2",
+        col_stypes={"orders": {"status": "categorical", "priority": "numerical"}},
+    )
+
+
+def test_generate_pql_repairs_temporal_scope_into_selection_sql(
+    monkeypatch,
+) -> None:
+    reviewed_pql = (
+        "PREDICT COUNT(receipts.* WHERE receipts.status = 'Late', 0, 30, days) > 0 "
+        "FOR EACH orders.order_id"
+    )
+    responses = iter(
+        [
+            reviewed_pql + " WHERE orders.promised_date >= '2026-08-20' "
+            "AND orders.promised_date <= '2026-09-19'",
+            f"""```pql
+{reviewed_pql}
+```
+```sql
+SELECT order_id FROM orders
+WHERE status IN ('Open', 'Partially Received')
+  AND promised_date >= DATE '2026-08-20'
+  AND promised_date <= DATE '2026-09-19'
+```""",
+        ]
+    )
+    prompts: list[str] = []
+
+    def invoke(_llm, prompt: str) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    class Connector:
+        def execute(self, sql: str) -> pd.DataFrame:
+            assert "promised_date >= DATE '2026-08-20'" in sql
+            assert "promised_date <= DATE '2026-09-19'" in sql
+            return pd.DataFrame({"order_id": ["PO-1"]})
+
+    class Model:
+        def __init__(self) -> None:
+            self.validated: list[str] = []
+            self.predicted: list[str] = []
+
+        def validate_pql(self, query: str) -> None:
+            self.validated.append(query)
+
+        def predict(self, query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
+            self.predicted.append(query)
+            return pd.DataFrame({"ENTITY": indices, "TRUE_PROB": [0.75]})
+
+    model = Model()
+    monkeypatch.setattr(pql_gen, "invoke_text", invoke)
+
+    result = generate_pql(
+        "Which open orders due from 2026-08-20 through 2026-09-19 "
+        "are likely to have a late receipt in the next 30 days?",
+        llm=object(),
+        kumo_model=model,
+        connector=Connector(),
+        graph_ddl=(
+            "orders(order_id ID, status categorical, promised_date timestamp)"
+            "  -- PRIMARY KEY (order_id)\n"
+            "receipts(receipt_id ID, order_id ID, status categorical)"
+            "  -- PRIMARY KEY (receipt_id)\n"
+            "FOREIGN KEY receipts.order_id -> orders.<pk>"
+        ),
+        graph_edges=[("receipts", "order_id", "orders")],
+        graph_col_stypes={
+            "orders": {
+                "order_id": "ID",
+                "status": "categorical",
+                "promised_date": "timestamp",
+            },
+            "receipts": {"status": "categorical"},
+        },
+        available_entity_ids={"orders": ["PO-1", "PO-2"]},
+        examples=[
+            {
+                "question": "Which open orders are likely to have a late receipt?",
+                "query": reviewed_pql,
+            }
+        ],
+        max_tries=2,
+    )
+
+    assert result.success
+    assert result.attempts == 2
+    assert result.pql == reviewed_pql
+    assert model.validated == [reviewed_pql]
+    assert model.predicted == [reviewed_pql]
+    assert "SEPARATE entity-selection" in prompts[1]
+
+
 def test_unquote_and_quote_round_trip() -> None:
     assert pql_gen.unquote_name("`Customer ID`") == "Customer ID"
     assert pql_gen.unquote_name("CUSTOMER_ID") == "CUSTOMER_ID"

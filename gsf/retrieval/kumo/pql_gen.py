@@ -152,6 +152,7 @@ _TABLE_COL = re.compile(rf"({_IDENT})\s*\.\s*({_IDENT}|\*)")
 _WINDOW_TAIL = re.compile(r",\s*-?\d+\s*,\s*-?\d+\s*,\s*[A-Za-z]+\s*$")
 _REL_COMPARISON = re.compile(rf"({_IDENT})\s*\.\s*({_IDENT})\s*(>=|<=|>|<(?!>))")
 _NON_ORDINAL_STYPES = frozenset({"categorical", "multicategorical", "ID", "text"})
+_TEMPORAL_STYPES = frozenset({"timestamp"})
 
 
 class PqlStaticError(ValueError):
@@ -300,6 +301,13 @@ def validate_pql_static(
             stype = col_stypes.get(unquote_name(tbl).lower(), {}).get(
                 unquote_name(col).lower()
             )
+            if stype in _TEMPORAL_STYPES:
+                raise PqlStaticError(
+                    f"'{tbl}.{col}' is a {stype} column and cannot be used for a temporal bound in PQL. "
+                    "Remove this date/time predicate from PQL and preserve it in the SEPARATE entity-selection "
+                    "```sql block. Use the PQL aggregation's (start, end, unit) arguments for the prediction "
+                    "window."
+                )
             if stype in _NON_ORDINAL_STYPES:
                 raise PqlStaticError(
                     f"'{tbl}.{col}' is a {stype} column and cannot be compared with '{op}'. Compare a "
