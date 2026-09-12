@@ -20,6 +20,7 @@ from gsf.retrieval.kumo.pql_gen import _resolve_indices
 from gsf.retrieval.kumo.pql_gen import _retry_at_full_neighbourhood
 from gsf.retrieval.kumo.pql_gen import _validate_prediction_scope_ids
 from gsf.retrieval.kumo.pql_gen import canonicalize_pql_identifiers
+from gsf.retrieval.kumo.pql_gen import extract_entity_sql
 from gsf.retrieval.kumo.pql_gen import extract_pql
 from gsf.retrieval.kumo.pql_gen import generate_pql
 from gsf.retrieval.kumo.pql_gen import parse_entity
@@ -99,6 +100,19 @@ FOR EACH jobs.job_id
 ```"""
 
     assert extract_pql(response) == ("PREDICT events.status\nFOR EACH jobs.job_id")
+
+
+def test_extract_entity_sql_allows_prediction_named_relation() -> None:
+    response = """```pql
+PREDICT events.status FOR EACH deployment_prediction_entities.deployment_id
+```
+```sql
+SELECT deployment_id FROM deployment_prediction_entities
+```"""
+
+    assert extract_entity_sql(response) == (
+        "SELECT deployment_id FROM deployment_prediction_entities"
+    )
 
 
 @pytest.mark.parametrize(

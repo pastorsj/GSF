@@ -1202,7 +1202,7 @@ def extract_entity_sql(text: str) -> str | None:
         block = match.group(1).strip()
         if (
             block
-            and "PREDICT" not in block.upper()
+            and _PREDICT_LINE_START.search(block) is None
             and re.match(r"(?is)^\s*(WITH|SELECT)\b", block)
         ):
             return block.rstrip(";").strip()
