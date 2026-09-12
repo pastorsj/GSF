@@ -6,6 +6,7 @@ from typing import Any
 
 from gsf.retrieval.data_access import semantic_search
 from gsf.catalog.constants import Labels
+from gsf.semantic.constants import LABEL_PQL_ANALYSIS
 
 
 class _Retriever:
@@ -139,5 +140,44 @@ def test_postgres_filter_excludes_governed_views_before_vector_limit(
                     ]
                 }
             },
+        ]
+    }
+
+
+def test_schema_less_pql_examples_are_not_removed_by_view_exclusions(
+    monkeypatch,
+) -> None:
+    retriever = _Retriever(
+        [
+            {
+                "text": "Predict delays",
+                "_distance": 0.01,
+                "metadata": {
+                    "id": "prediction-example",
+                    "label": LABEL_PQL_ANALYSIS,
+                    "database_name": "analytics",
+                },
+            }
+        ],
+        fmt="dict",
+    )
+    monkeypatch.setattr(
+        semantic_search,
+        "_configured_governed_view_paths",
+        lambda _database: {("analytics", "prediction")},
+    )
+
+    rows = semantic_search.search_semantic_index(
+        retriever,
+        "Which orders will be delayed?",
+        label_filter=[LABEL_PQL_ANALYSIS],
+        database_name="analytics",
+    )
+
+    assert [row["id"] for row in rows] == ["prediction-example"]
+    assert retriever.calls[0]["vdb_kwargs"]["where"] == {
+        "$and": [
+            {"label": LABEL_PQL_ANALYSIS},
+            {"database_name": "analytics"},
         ]
     }

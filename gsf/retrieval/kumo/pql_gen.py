@@ -143,8 +143,10 @@ _PQL_BANNED_TIME_FUNCS = re.compile(
     re.IGNORECASE,
 )
 _RANK_TOP = re.compile(r"\bRANK\s+TOP\b", re.IGNORECASE)
+_RANK_TOP_CLAUSE = re.compile(r"\s+RANK\s+TOP\s+\d+\b", re.IGNORECASE)
 _FOR_EACH_KW = re.compile(r"\bFOR\s+EACH\b", re.IGNORECASE)
 _AGG_OPEN = re.compile(r"\b(COUNT|SUM|AVG|MIN|MAX|LIST_DISTINCT)\s*\(", re.IGNORECASE)
+_SCALAR_AGG_OPEN = re.compile(r"\b(COUNT|SUM|AVG|MIN|MAX)\s*\(", re.IGNORECASE)
 _TABLE_COL = re.compile(rf"({_IDENT})\s*\.\s*({_IDENT}|\*)")
 # The trailing ``, <start>, <end>, <unit>`` window args inside an aggregation (e.g. ``, 0, 90, days``).
 _WINDOW_TAIL = re.compile(r",\s*-?\d+\s*,\s*-?\d+\s*,\s*[A-Za-z]+\s*$")
@@ -154,6 +156,15 @@ _NON_ORDINAL_STYPES = frozenset({"categorical", "multicategorical", "ID", "text"
 
 class PqlStaticError(ValueError):
     """A PQL shape rejected by the cheap static lint before it reaches the backend."""
+
+
+def _drop_scalar_rank(pql: str) -> str:
+    """Remove link-only ranking syntax from scalar aggregation predictions."""
+
+    rank = _RANK_TOP_CLAUSE.search(pql)
+    if rank is None or not _SCALAR_AGG_OPEN.search(pql[: rank.start()]):
+        return pql
+    return pql[: rank.start()] + pql[rank.end() :]
 
 
 def _balanced_paren_body(text: str, open_idx: int) -> str:
@@ -1852,6 +1863,10 @@ def generate_pql(
             )
             continue
         pql = canonicalize_pql_identifiers(pql, graph_ddl)
+        # Scalar prediction frames are sorted by score after execution. RANK TOP
+        # is a link-prediction operator and changes an otherwise valid scalar PQL
+        # into a provider parse error when the question merely asks for a ranking.
+        pql = _drop_scalar_rank(pql)
         pql = prefer_explicit_change_targets(
             pql,
             question,

@@ -170,7 +170,10 @@ def _contract_relevant_tables(
                 f"Contract object {contract.database_name}.{table.schema_name}.{table.name} must be a catalog VIEW."
             )
         catalog_key = _catalog_primary_key(row.get("pk"))
-        if tuple(column.casefold() for column in catalog_key) != tuple(
+        # Catalog introspection cannot always recover primary-key metadata for a
+        # view.  The reviewed graph contract supplies that identity; when the
+        # catalog does report a key, it must still agree with the contract.
+        if catalog_key and tuple(column.casefold() for column in catalog_key) != tuple(
             column.casefold() for column in table.primary_key
         ):
             raise ValueError(
@@ -224,7 +227,7 @@ class PredictionGraphAgent(BaseAgent):
     """Build the KumoRFM graph/model for the relevant tables (prediction phase 1)."""
 
     def __init__(self):
-        super().__init__("prediction_graph")
+        super().__init__("prediction_graph", failure_decision="predict_failed")
 
     def execute(self, state: AgentState) -> dict[str, Any]:
         path_state = state.get("path_state", {})
@@ -238,6 +241,22 @@ class PredictionGraphAgent(BaseAgent):
                 path_state, connectors, relevant_tables
             )
             graph_contract = load_graph_contract(database_name)
+            # Few-shot PQL examples retrieved from the verified PqlAnalysis corpus.
+            examples = fetch_pql_examples(
+                state.get("semantic_retriever"),
+                get_standalone_question(state),
+                database_name,
+            )
+            if graph_contract is not None:
+                relevant_tables = _contract_relevant_tables(graph_contract)
+                examples = _filter_contract_examples(examples, graph_contract)
+            else:
+                # Enrich the table set with any table the examples reference before
+                # the graph is built, so the LLM can never cite a table absent from
+                # the graph.
+                relevant_tables = _enrich_relevant_tables(
+                    relevant_tables, examples, database_name=database_name
+                )
         except Exception as exc:
             self.logger.exception("KumoRFM graph contract resolution failed")
             context = _error_response(
@@ -253,21 +272,6 @@ class PredictionGraphAgent(BaseAgent):
                     "final_response": context,
                 },
             }
-        # Few-shot PQL examples retrieved from the verified PqlAnalysis corpus.
-        examples = fetch_pql_examples(
-            state.get("semantic_retriever"),
-            get_standalone_question(state),
-            database_name,
-        )
-        if graph_contract is not None:
-            relevant_tables = _contract_relevant_tables(graph_contract)
-            examples = _filter_contract_examples(examples, graph_contract)
-        else:
-            # Enrich the table set with any table the examples reference before the
-            # graph is built, so the LLM can never cite a table absent from the graph.
-            relevant_tables = _enrich_relevant_tables(
-                relevant_tables, examples, database_name=database_name
-            )
 
         try:
             context = build_prediction_context(

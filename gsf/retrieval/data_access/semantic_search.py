@@ -35,6 +35,7 @@ from typing import Literal
 
 from gsf.catalog.constants import Labels
 
+from gsf.semantic.constants import LABEL_COLUMN_ATTRIBUTE
 from gsf.semantic.constants import LABEL_SQL_ATTRIBUTE
 
 if TYPE_CHECKING:
@@ -56,6 +57,11 @@ PER_LABEL_LIMITS: dict[str, int] = {
     Labels.CUSTOM_ANALYSIS: 3,
     LABEL_SQL_ATTRIBUTE: 3,
 }
+
+# Only catalog-backed records carry a schema path. Applying a governed-view
+# exclusion to schema-less semantic records (for example PQL or custom analyses)
+# makes PostgreSQL's metadata filter discard them as well.
+_GOVERNED_PATH_LABELS = frozenset({Labels.TABLE, Labels.COLUMN, LABEL_COLUMN_ATTRIBUTE})
 
 # ``retriever.query`` embeds the entity text via the remote NIM embeddings
 # endpoint before it can run the vector search — a transient 5xx there
@@ -381,12 +387,17 @@ def search_semantic_index(
 
     all_hits: list[dict] = []
     for label in labels_to_query:
+        label_excluded_paths = (
+            excluded_catalog_paths
+            if label is None or label in _GOVERNED_PATH_LABELS
+            else set()
+        )
         where_clause = _build_metadata_where_clause(
             labels=[label] if label else None,
             database_name=database_name,
             schema_name=schema_name,
             fmt=fmt,
-            excluded_catalog_paths=excluded_catalog_paths,
+            excluded_catalog_paths=label_excluded_paths,
         )
         vdb_kwargs = {"where": where_clause} if where_clause else None
         top_k = (

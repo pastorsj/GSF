@@ -100,6 +100,42 @@ FOR EACH jobs.job_id
     assert extract_pql(response) == ("PREDICT events.status\nFOR EACH jobs.job_id")
 
 
+@pytest.mark.parametrize(
+    "aggregation",
+    [
+        "COUNT(events.*)",
+        "COUNT(events.*, 0, 30, days) > 0",
+        "SUM(events.value)",
+    ],
+)
+def test_scalar_prediction_drops_link_only_rank(aggregation: str) -> None:
+    pql = f"PREDICT {aggregation} RANK TOP 100 FOR EACH entities.entity_id"
+
+    assert pql_gen._drop_scalar_rank(pql) == (
+        f"PREDICT {aggregation} FOR EACH entities.entity_id"
+    )
+
+
+def test_link_prediction_keeps_rank() -> None:
+    pql = (
+        "PREDICT LIST_DISTINCT(events.item_id) RANK TOP 10 FOR EACH entities.entity_id"
+    )
+
+    assert pql_gen._drop_scalar_rank(pql) == pql
+
+
+def test_link_prediction_keeps_rank_when_assumption_contains_scalar_aggregation() -> (
+    None
+):
+    pql = (
+        "PREDICT LIST_DISTINCT(events.item_id, 0, 7, days) "
+        "RANK TOP 10 FOR EACH entities.entity_id "
+        "ASSUMING COUNT(events.*, 0, 7, days) > 0"
+    )
+
+    assert pql_gen._drop_scalar_rank(pql) == pql
+
+
 def test_canonicalize_pql_identifiers_uses_graph_casing() -> None:
     graph_ddl = (
         "JOBS(JOB_ID primary_key, PRIORITY_TIER categorical)  -- PRIMARY KEY (JOB_ID)"
