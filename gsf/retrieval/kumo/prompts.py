@@ -183,6 +183,13 @@ def build_pql_prompt(
                 block += f"\nWhy: {reasoning}"
             blocks.append(block)
         sections.append("## Verified examples (question → PQL)\n" + "\n".join(blocks))
+        sections.append(
+            "## Verified-query boundary\n"
+            "When a verified example matches the requested predictive task, keep its PQL target, entity, and "
+            "window unchanged. Put every user-specific population restriction (status, tier, region, date, or "
+            "other entity attribute) only in the separate entity-selection ```sql block; never append a "
+            "population WHERE after FOR EACH."
+        )
 
     if prev_pql:
         sections.append(

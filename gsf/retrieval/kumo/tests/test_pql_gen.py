@@ -1179,15 +1179,25 @@ def test_static_lint_moves_temporal_entity_bounds_to_selection_sql(
 
 
 def test_static_lint_keeps_non_temporal_entity_comparisons() -> None:
-    pql_gen.validate_pql_static(
+    pql = (
         "PREDICT COUNT(receipts.*, 0, 30, days) > 0 "
         "FOR EACH orders.order_id WHERE "
-        "orders.status = 'Open' AND orders.priority >= 2",
+        "orders.status = 'Open' AND orders.priority >= 2"
+    )
+    pql_gen.validate_pql_static(
+        pql,
         col_stypes={"orders": {"status": "categorical", "priority": "numerical"}},
     )
 
+    with pytest.raises(pql_gen.PqlStaticError, match="Verified PQL guidance"):
+        pql_gen.validate_pql_static(
+            pql,
+            col_stypes={"orders": {"status": "categorical", "priority": "numerical"}},
+            reviewed_example=True,
+        )
 
-def test_generate_pql_repairs_temporal_scope_into_selection_sql(
+
+def test_generate_pql_repairs_reviewed_population_scope_into_selection_sql(
     monkeypatch,
 ) -> None:
     reviewed_pql = (
@@ -1196,8 +1206,7 @@ def test_generate_pql_repairs_temporal_scope_into_selection_sql(
     )
     responses = iter(
         [
-            reviewed_pql + " WHERE orders.promised_date >= '2026-08-20' "
-            "AND orders.promised_date <= '2026-09-19'",
+            reviewed_pql + " WHERE orders.status = 'Open'",
             f"""```pql
 {reviewed_pql}
 ```
@@ -1224,13 +1233,13 @@ WHERE status IN ('Open', 'Partially Received')
     class Model:
         def __init__(self) -> None:
             self.validated: list[str] = []
-            self.predicted: list[str] = []
+            self.predicted: list[tuple[str, list[str] | None]] = []
 
         def validate_pql(self, query: str) -> None:
             self.validated.append(query)
 
         def predict(self, query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
-            self.predicted.append(query)
+            self.predicted.append((query, indices))
             return pd.DataFrame({"ENTITY": indices, "TRUE_PROB": [0.75]})
 
     model = Model()
@@ -1272,8 +1281,9 @@ WHERE status IN ('Open', 'Partially Received')
     assert result.attempts == 2
     assert result.pql == reviewed_pql
     assert model.validated == [reviewed_pql]
-    assert model.predicted == [reviewed_pql]
+    assert model.predicted == [(reviewed_pql, ["PO-1"])]
     assert "SEPARATE entity-selection" in prompts[1]
+    assert "Verified-query boundary" in prompts[0]
 
 
 def test_unquote_and_quote_round_trip() -> None:

@@ -145,6 +145,9 @@ _PQL_BANNED_TIME_FUNCS = re.compile(
 _RANK_TOP = re.compile(r"\bRANK\s+TOP\b", re.IGNORECASE)
 _RANK_TOP_CLAUSE = re.compile(r"\s+RANK\s+TOP\s+\d+\b", re.IGNORECASE)
 _FOR_EACH_KW = re.compile(r"\bFOR\s+EACH\b", re.IGNORECASE)
+_FOR_EACH_POPULATION_FILTER = re.compile(
+    rf"\bFOR\s+EACH\s+{_IDENT}\s*\.\s*{_IDENT}\s+WHERE\b", re.IGNORECASE
+)
 _AGG_OPEN = re.compile(r"\b(COUNT|SUM|AVG|MIN|MAX|LIST_DISTINCT)\s*\(", re.IGNORECASE)
 _SCALAR_AGG_OPEN = re.compile(r"\b(COUNT|SUM|AVG|MIN|MAX)\s*\(", re.IGNORECASE)
 _TABLE_COL = re.compile(rf"({_IDENT})\s*\.\s*({_IDENT}|\*)")
@@ -208,6 +211,7 @@ def validate_pql_static(
     *,
     edges: list[tuple[str, str, str]] | None = None,
     col_stypes: dict[str, dict[str, str]] | None = None,
+    reviewed_example: bool = False,
 ) -> None:
     """Reject known-bad PQL shapes with an actionable message, before the backend is ever called.
 
@@ -217,12 +221,23 @@ def validate_pql_static(
     an aggregation whose event table has no DIRECT foreign key to the prediction entity (KumoRFM does not
     traverse multi-hop paths inside an aggregation). When ``col_stypes`` (``table -> {column -> declared
     stype}``) is supplied, it also rejects a ``>``/``<`` comparison against a declared non-ordinal column.
-    Raises :class:`PqlStaticError` (a ``ValueError``) so it flows into the existing repair loop as
-    ``prev_error``.
+    When ``reviewed_example`` is true, the governed flow requires population filters to use the separate
+    entity-selection SQL. Raises :class:`PqlStaticError` (a ``ValueError``) so it flows into the existing
+    repair loop as ``prev_error``.
     """
     text = pql.strip()
     if not text:
         raise PqlStaticError("Empty PQL.")
+
+    # In reviewed-example mode, user-specific population filters belong in the
+    # separately validated entity-selection SQL. Adding one to PQL changes the
+    # learning task and can leave Kumo with no positive context.
+    if reviewed_example and _FOR_EACH_POPULATION_FILTER.search(text):
+        raise PqlStaticError(
+            "Verified PQL guidance is available. In this governed flow, remove the population WHERE after "
+            "FOR EACH and preserve every requested entity filter in the SEPARATE entity-selection ```sql "
+            "block."
+        )
 
     # 1. PQL has no subqueries — a stray SELECT means the model wrote SQL inside the PREDICT (e.g. ASSUMING).
     if _SELECT_TOKEN.search(text):
@@ -1900,7 +1915,12 @@ def generate_pql(
             except Exception:  # noqa: BLE001 - surfacing the PQL early must never break the run
                 logger.debug("on_pql callback failed", exc_info=True)
         try:
-            validate_pql_static(pql, edges=graph_edges, col_stypes=graph_col_stypes)
+            validate_pql_static(
+                pql,
+                edges=graph_edges,
+                col_stypes=graph_col_stypes,
+                reviewed_example=bool(examples) and not explain,
+            )
             kumo_model.validate_pql(pql)
             if explain:
                 indices = _resolve_single_index(
