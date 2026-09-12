@@ -143,6 +143,14 @@ _ENTITY_SQL_INSTRUCTION = (
     "   block only when the question is genuinely about all entities."
 )
 
+_REVIEWED_ENTITY_SQL_INSTRUCTION = (
+    "2. Return a read-only SELECT containing ONLY the entity primary-key column in a separate ```sql fenced\n"
+    "   block. This is REQUIRED for every prediction when verified examples are shown. Preserve every named\n"
+    "   subset restriction (tier, segment, region, status, date, or entity id) in its WHERE clause. If the\n"
+    "   question genuinely covers the full population, still emit `SELECT <pk> FROM <entity_table>` without a\n"
+    "   subset predicate. The runtime intersects either form with the graph-owned entity inventory."
+)
+
 
 def build_pql_prompt(
     *,
@@ -188,7 +196,8 @@ def build_pql_prompt(
             "When a verified example matches the requested predictive task, keep its PQL target, entity, and "
             "window unchanged. Put every user-specific population restriction (status, tier, region, date, or "
             "other entity attribute) only in the separate entity-selection ```sql block; never append a "
-            "population WHERE after FOR EACH."
+            "population WHERE after FOR EACH. Always return the separate SQL block in this verified flow, using "
+            "an unfiltered primary-key SELECT only when the question genuinely covers the full population."
         )
 
     if prev_pql:
@@ -210,7 +219,9 @@ def build_pql_prompt(
 
     output_lines = ["## Output format", "1. The PQL in a ```pql fenced block."]
     if not explain_entity:
-        output_lines.append(_ENTITY_SQL_INSTRUCTION)
+        output_lines.append(
+            _REVIEWED_ENTITY_SQL_INSTRUCTION if examples else _ENTITY_SQL_INSTRUCTION
+        )
     sections.append("\n".join(output_lines))
 
     sections.append("## Question\n" + question)

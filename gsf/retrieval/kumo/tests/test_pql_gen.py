@@ -194,6 +194,7 @@ def test_resolve_indices_does_not_turn_an_empty_explicit_scope_into_predict_all(
             "SELECT entity_id FROM entities WHERE lifecycle_status = 'active'",
             _EmptyConnector(),
             10,
+            table_names={"entities": '"entities"'},
             available_entity_ids={"entities": ["entity-1", "entity-2"]},
         )
 
@@ -218,8 +219,48 @@ def test_resolve_indices_deduplicates_explicit_sql_in_first_seen_order() -> None
         "SELECT entity_id FROM entities",
         Connector(),
         10,
+        table_names={"entities": '"entities"'},
         available_entity_ids={"entities": ["entity-1", "entity-3"]},
     ) == ["entity-3", "entity-1"]
+
+
+@pytest.mark.parametrize(
+    "entity_sql",
+    [
+        "SELECT order_id FROM raw_orders WHERE secret_flag",
+        "SELECT order_id FROM orders; SELECT order_id FROM raw_orders",
+        "WITH removed AS (DELETE FROM orders RETURNING order_id) SELECT order_id FROM removed",
+    ],
+)
+def test_resolve_indices_rejects_uncontained_entity_sql(entity_sql: str) -> None:
+    with pytest.raises(PqlEntitySelectionError, match="not safe to execute"):
+        _resolve_indices(
+            "PREDICT orders.status FOR EACH orders.order_id",
+            entity_sql,
+            _UnexpectedConnector(),
+            10,
+            table_names={"orders": '"prediction"."orders"'},
+            available_entity_ids={"orders": ["PO-1"]},
+        )
+
+
+def test_resolve_indices_accepts_cte_over_contracted_relation() -> None:
+    class Connector:
+        dialect = "duckdb"
+
+        def execute(self, sql: str) -> pd.DataFrame:
+            assert 'FROM "prediction"."orders"' in sql
+            return pd.DataFrame({"order_id": ["PO-1"]})
+
+    assert _resolve_indices(
+        "PREDICT orders.status FOR EACH orders.order_id",
+        "WITH open_orders AS (SELECT order_id FROM orders WHERE status = 'Open') "
+        "SELECT order_id FROM open_orders",
+        Connector(),
+        10,
+        table_names={"orders": '"prediction"."orders"'},
+        available_entity_ids={"orders": ["PO-1"]},
+    ) == ["PO-1"]
 
 
 @pytest.mark.parametrize(
@@ -565,6 +606,7 @@ SELECT entity_id FROM entities WHERE lifecycle_status = 'Active'
         column_reference=(
             '- table="entities", column="lifecycle_status", type=categorical, exact values=["Active", "Inactive"]'
         ),
+        table_names={"entities": '"entities"'},
         available_entity_ids={"entities": ["entity-1"]},
         max_tries=2,
     )
@@ -772,6 +814,7 @@ def test_graph_scope_never_broadens_an_explicit_entity_selection() -> None:
         "SELECT entity_id FROM entities",
         Connector(),
         10,
+        table_names={"entities": '"entities"'},
         available_entity_ids=available,
     ) == ["entity-1"]
 
@@ -827,6 +870,7 @@ SELECT entity_id FROM entities WHERE review_tier = 'priority'
             "  -- PRIMARY KEY (entity_id)"
         ),
         group_by="region",
+        table_names={"entities": '"entities"'},
         available_entity_ids={"entities": ["entity-1", "entity-2", "entity-3"]},
         prediction_scope=_prediction_scope(),
         prediction_scope_ids=("entity-1", "entity-3"),
@@ -883,6 +927,7 @@ SELECT entity_id FROM entities WHERE review_tier = 'priority'
             "  -- PRIMARY KEY (entity_id)"
         ),
         group_by="region",
+        table_names={"entities": '"entities"'},
         available_entity_ids={"entities": ["entity-1", "entity-2", "entity-3"]},
         prediction_scope=_prediction_scope(),
         prediction_scope_ids=("entity-1", "entity-3"),
@@ -1242,8 +1287,10 @@ def test_static_lint_keeps_non_temporal_entity_comparisons() -> None:
         )
 
 
+@pytest.mark.parametrize("first_response_has_pql_filter", [False, True])
 def test_generate_pql_repairs_reviewed_population_scope_into_selection_sql(
     monkeypatch,
+    first_response_has_pql_filter: bool,
 ) -> None:
     reviewed_pql = (
         "PREDICT COUNT(receipts.* WHERE receipts.status = 'Late', 0, 30, days) > 0 "
@@ -1251,7 +1298,10 @@ def test_generate_pql_repairs_reviewed_population_scope_into_selection_sql(
     )
     responses = iter(
         [
-            reviewed_pql + " WHERE orders.status = 'Open'",
+            reviewed_pql
+            + (
+                " WHERE orders.status = 'Open'" if first_response_has_pql_filter else ""
+            ),
             f"""```pql
 {reviewed_pql}
 ```
@@ -1312,6 +1362,7 @@ WHERE status IN ('Open', 'Partially Received')
             },
             "receipts": {"status": "categorical"},
         },
+        table_names={"orders": '"orders"', "receipts": '"receipts"'},
         available_entity_ids={"orders": ["PO-1", "PO-2"]},
         examples=[
             {
@@ -1329,6 +1380,83 @@ WHERE status IN ('Open', 'Partially Received')
     assert model.predicted == [(reviewed_pql, ["PO-1"])]
     assert "SEPARATE entity-selection" in prompts[1]
     assert "Verified-query boundary" in prompts[0]
+
+
+def test_generate_pql_rejects_reviewed_query_without_entity_sql(monkeypatch) -> None:
+    reviewed_pql = "PREDICT COUNT(receipts.*, 0, 30, days) > 0 FOR EACH orders.order_id"
+
+    class Model:
+        def validate_pql(self, _query: str) -> None:
+            raise AssertionError(
+                "missing reviewed entity SQL must fail before validation"
+            )
+
+        def predict(self, _query: str, **_kwargs) -> pd.DataFrame:
+            raise AssertionError(
+                "missing reviewed entity SQL must not reach prediction"
+            )
+
+    monkeypatch.setattr(pql_gen, "invoke_text", lambda _llm, _prompt: reviewed_pql)
+
+    result = generate_pql(
+        "Which open orders due this month will be late?",
+        llm=object(),
+        kumo_model=Model(),
+        connector=_UnexpectedConnector(),
+        graph_ddl="orders(order_id ID)  -- PRIMARY KEY (order_id)",
+        available_entity_ids={"orders": ["OPEN-DUE", "CLOSED-OLD"]},
+        examples=[{"question": "Which orders will be late?", "query": reviewed_pql}],
+        max_tries=1,
+    )
+
+    assert not result.success
+    assert result.entity_sql is None
+    assert "required separate entity-selection" in (result.error or "")
+
+
+def test_generate_pql_accepts_reviewed_full_population_entity_sql(monkeypatch) -> None:
+    reviewed_pql = "PREDICT COUNT(receipts.*, 0, 30, days) > 0 FOR EACH orders.order_id"
+
+    class Connector:
+        def execute(self, sql: str) -> pd.DataFrame:
+            assert sql == 'SELECT order_id FROM "orders"'
+            return pd.DataFrame({"order_id": ["PO-1", "PO-2"]})
+
+    class Model:
+        def __init__(self) -> None:
+            self.indices: list[str] | None = None
+
+        def validate_pql(self, _query: str) -> None:
+            pass
+
+        def predict(self, _query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
+            self.indices = indices
+            return pd.DataFrame({"ENTITY": indices, "TRUE_PROB": [0.8, 0.7]})
+
+    monkeypatch.setattr(
+        pql_gen,
+        "invoke_text",
+        lambda _llm, _prompt: (
+            f"```pql\n{reviewed_pql}\n```\n```sql\nSELECT order_id FROM orders\n```"
+        ),
+    )
+    model = Model()
+
+    result = generate_pql(
+        "Which orders will be late?",
+        llm=object(),
+        kumo_model=model,
+        connector=Connector(),
+        graph_ddl="orders(order_id ID)  -- PRIMARY KEY (order_id)",
+        table_names={"orders": '"orders"'},
+        available_entity_ids={"orders": ["PO-1", "PO-2"]},
+        examples=[{"question": "Which orders will be late?", "query": reviewed_pql}],
+        max_tries=1,
+    )
+
+    assert result.success
+    assert result.entity_sql == "SELECT order_id FROM orders"
+    assert model.indices == ["PO-1", "PO-2"]
 
 
 def test_unquote_and_quote_round_trip() -> None:

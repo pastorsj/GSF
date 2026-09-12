@@ -34,12 +34,18 @@ from dataclasses import field
 from typing import Any
 from typing import Protocol
 
+import sqlglot
 from langchain_core.language_models import BaseChatModel
+from sqlglot import expressions as exp
+
 from gsf.connectors.base import SQLDatabase
 
 from gsf.retrieval.kumo.graph_contract import GraphContractPredictionScope
 from gsf.retrieval.kumo.prompts import build_pql_prompt
 from gsf.retrieval.kumo.provider import is_nonrepairable_provider_error
+from gsf.retrieval.text_to_sql.agents.sql_parse_validation import (
+    generated_sql_safety_error,
+)
 from gsf.utils.llm_invoke import safe_invoke_text as invoke_text
 
 logger = logging.getLogger(__name__)
@@ -84,6 +90,49 @@ def _qualify_from_clauses(sql: str, table_names: dict[str, str] | None) -> str:
         return f"{match.group(1)} {qualified}" if qualified else match.group(0)
 
     return _FROM_JOIN_RE.sub(repl, sql)
+
+
+def _validated_entity_sql(
+    sql: str,
+    table_names: dict[str, str] | None,
+    dialect: str | None,
+) -> str:
+    """Qualify and contain model-authored entity SQL to contracted relations."""
+    if not table_names:
+        raise PqlEntitySelectionError(
+            "Entity-selection SQL cannot run without a contracted table map."
+        )
+
+    allowed_relations: set[tuple[str, str, str]] = set()
+    try:
+        for relation_sql in table_names.values():
+            relation = sqlglot.parse_one(relation_sql, into=exp.Table)
+            if not isinstance(relation.this, exp.Identifier):
+                raise ValueError(relation_sql)
+            allowed_relations.add(
+                (
+                    relation.catalog.casefold() if relation.catalog else "",
+                    relation.db.casefold() if relation.db else "",
+                    relation.name.casefold(),
+                )
+            )
+    except Exception as exc:
+        raise PqlEntitySelectionError(
+            "The contracted table map contains an invalid SQL relation."
+        ) from exc
+
+    qualified_sql = _qualify_from_clauses(sql, table_names)
+    safety_error = generated_sql_safety_error(
+        qualified_sql,
+        {},
+        [dialect] if dialect else ["duckdb", "postgres", "snowflake"],
+        allowed_relations=allowed_relations,
+    )
+    if safety_error:
+        raise PqlEntitySelectionError(
+            f"The entity-selection SQL is not safe to execute: {safety_error}"
+        )
+    return qualified_sql
 
 
 _PQL_FENCE = re.compile(r"```pql\s*(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -1287,7 +1336,9 @@ def _resolve_indices(
         else None
     )
     if entity_sql:
-        df = connector.execute(_qualify_from_clauses(entity_sql, table_names))
+        dialect = getattr(connector, "dialect", None)
+        safe_sql = _validated_entity_sql(entity_sql, table_names, dialect)
+        df = connector.execute(safe_sql)
         ids = df.iloc[:, 0].dropna().tolist() if not df.empty else []
         ids = list(dict.fromkeys(ids))
         if available is not None:
@@ -1828,6 +1879,7 @@ def generate_pql(
         available_entity_ids,
     )
     examples = examples or []
+    reviewed_example = bool(examples) and not explain
     docs: list[str] = []
 
     result = PqlGenerationResult(question=question)
@@ -1919,8 +1971,14 @@ def generate_pql(
                 pql,
                 edges=graph_edges,
                 col_stypes=graph_col_stypes,
-                reviewed_example=bool(examples) and not explain,
+                reviewed_example=reviewed_example,
             )
+            if reviewed_example and not entity_sql:
+                raise PqlStaticError(
+                    "Verified PQL guidance is active. Return the required separate entity-selection ```sql "
+                    "block, preserving every requested population restriction. For a genuinely full-population "
+                    "question, select only the entity primary key without a subset predicate."
+                )
             kumo_model.validate_pql(pql)
             if explain:
                 indices = _resolve_single_index(

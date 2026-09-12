@@ -77,6 +77,14 @@ def test_rejects_multiple_or_non_query_statements(sql: str) -> None:
     assert "exactly one read-only query" in error
 
 
+def test_rejects_data_modification_inside_cte() -> None:
+    sql = "WITH removed AS (DELETE FROM orders RETURNING id) SELECT id FROM removed"
+
+    error = generated_sql_safety_error(sql, SCHEMAS, ["duckdb"])
+
+    assert "exactly one read-only query" in error
+
+
 @pytest.mark.parametrize(
     "sql",
     [

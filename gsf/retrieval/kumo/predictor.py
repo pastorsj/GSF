@@ -414,8 +414,7 @@ def _load_relevant_frames(
             elapsed,
         )
         frames[name] = df
-        if schema:
-            name_map[name] = _quote(schema, table)
+        name_map[name] = _quote(schema, table)
         catalog_keys = _catalog_key_columns(t)
         if catalog_keys:
             key_columns[name] = catalog_keys

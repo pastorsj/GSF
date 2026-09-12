@@ -53,6 +53,27 @@ _SQLGLOT_DIALECTS = {
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
+_NON_READ_ONLY_NODES = (
+    exp.DML,
+    exp.DDL,
+    exp.Command,
+    exp.Drop,
+    exp.Alter,
+    exp.TruncateTable,
+    exp.Use,
+    exp.Set,
+    exp.Transaction,
+    exp.Commit,
+    exp.Rollback,
+    exp.Grant,
+    exp.Revoke,
+    exp.Attach,
+    exp.Detach,
+    exp.Pragma,
+    exp.Into,
+    exp.Lock,
+)
+
 
 def _vacuous_group_by_check_enabled() -> bool:
     """Whether :func:`detect_vacuous_group_by` is wired in.
@@ -65,8 +86,19 @@ def _vacuous_group_by_check_enabled() -> bool:
     return os.environ.get("DETECT_VACUOUS_GROUP_BY", "").strip().lower() in _TRUTHY
 
 
-def generated_sql_safety_error(sql: str, schemas: dict, dialects: list[str]) -> str:
-    """Reject executable SQL outside the governed catalog relation boundary."""
+def generated_sql_safety_error(
+    sql: str,
+    schemas: dict,
+    dialects: list[str],
+    *,
+    allowed_relations: set[tuple[str, str, str]] | None = None,
+) -> str:
+    """Reject non-read-only SQL and relations outside the governed boundary.
+
+    ``allowed_relations`` optionally supplies exact, case-folded
+    ``(catalog, schema, table)`` paths. This is used by callers that already
+    have a smaller relation contract than the full catalog.
+    """
     statements = None
     for dialect in dialects:
         try:
@@ -77,12 +109,14 @@ def generated_sql_safety_error(sql: str, schemas: dict, dialects: list[str]) -> 
         except Exception:
             continue
     if statements is None:
-        return ""  # The existing catalog parser reports the syntax error.
+        return "Generated SQL could not be parsed as a read-only query."
     statements = [statement for statement in statements if statement is not None]
     if len(statements) != 1 or not isinstance(statements[0], exp.Query):
         return "Generated SQL must contain exactly one read-only query."
 
     statement = statements[0]
+    if any(isinstance(node, _NON_READ_ONLY_NODES) for node in statement.walk()):
+        return "Generated SQL must contain exactly one read-only query."
     cte_names = {
         cte.alias_or_name.casefold()
         for cte in statement.find_all(exp.CTE)
@@ -98,12 +132,22 @@ def generated_sql_safety_error(sql: str, schemas: dict, dialects: list[str]) -> 
         name = table.name
         if not table.db and not table.catalog and name.casefold() in cte_names:
             continue
-        schema_name = table.db.casefold() if table.db else ""
-        if schema_name:
-            schema = schemas.get(schema_name)
-            recognized = schema is not None and schema.table_exists(name)
+        relation = (
+            table.catalog.casefold() if table.catalog else "",
+            table.db.casefold() if table.db else "",
+            name.casefold(),
+        )
+        if allowed_relations is not None:
+            recognized = relation in allowed_relations
         else:
-            recognized = any(schema.table_exists(name) for schema in schemas.values())
+            schema_name = table.db.casefold() if table.db else ""
+            if schema_name:
+                schema = schemas.get(schema_name)
+                recognized = schema is not None and schema.table_exists(name)
+            else:
+                recognized = any(
+                    schema.table_exists(name) for schema in schemas.values()
+                )
         if not recognized:
             return (
                 f"Generated SQL references relation {table.sql()!r}, which is not "
