@@ -54,13 +54,29 @@ config:
 The client offers to sign in, the user gets GSF's normal login page, and every
 call afterwards runs as that person.
 
+### Private service-to-service mode
+
+An agent sidecar on the same private network as the GSF backend can opt into a
+non-interactive mode:
+
+```sh
+GSF_API_URL=http://gsf:3001 \
+GSF_MCP_TRUSTED_SERVICE_MODE=true \
+gsf-mcp
+```
+
+This mode has no end-user OAuth boundary and must not be exposed outside that
+private network. It carries no stored credential and strips any caller-supplied
+authorization headers before calling GSF. The ordinary/default mode remains
+per-user OAuth.
+
 Then ask something like *"what does GSF mean by an active customer, and how many
 were there last quarter?"*
 
 ## Tools
 
-`ask_question` is the one that answers questions: it runs GSF's text-to-SQL agent
-and returns the answer, the SQL it ran, and the rows. The rest — `search_terms`,
+`ask_question` is the one that answers questions: it runs GSF's structured-data
+agent and returns the answer, the SQL or PQL it ran, and the rows. The rest — `search_terms`,
 `describe_table`, `check_answerable` and friends — let an agent learn the
 vocabulary and check its assumptions first.
 

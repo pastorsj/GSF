@@ -2,7 +2,7 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``ask_question`` — the text-to-SQL agent as a single MCP tool.
+"""``ask_question`` — GSF structured retrieval and prediction as one MCP tool.
 
 Hand-written rather than generated, because ``POST /api/chat/completions``
 answers with ``text/event-stream``: the agent emits a step event per graph node
@@ -47,7 +47,10 @@ class DataAnswer(BaseModel):
     """Structured result of one ``ask_question`` call."""
 
     answer: str = Field(description="Natural-language answer to the question.")
-    sql: str = Field(default="", description="The SQL that produced the rows.")
+    sql: str = Field(
+        default="",
+        description="The SQL or PQL query that produced the rows.",
+    )
     rows: list[dict[str, Any]] = Field(
         default_factory=list,
         description=f"Result rows, at most {MAX_ROWS} of them.",
@@ -154,8 +157,8 @@ def register(mcp: FastMCP, settings: Settings, client: httpx.AsyncClient) -> Non
         description=(
             "Ask a natural-language question about the data connected to this "
             "GSF deployment. GSF resolves the question against its semantic "
-            "layer, writes SQL, runs it, and returns the answer together with "
-            "the SQL it used.\n\n"
+            "layer, runs structured retrieval or prediction, and returns the "
+            "answer together with the SQL or PQL it used.\n\n"
             "This is the primary tool and the reason GSF exists. It is also "
             "slow — many sequential model calls, typically tens of seconds — "
             "so use check_answerable first when you are unsure the question is "
@@ -168,13 +171,10 @@ def register(mcp: FastMCP, settings: Settings, client: httpx.AsyncClient) -> Non
         ctx: Context,
         conversation_id: str | None = None,
         evidence: str | None = None,
+        target_db: str | None = None,
+        prediction: bool | None = None,
     ) -> DataAnswer:
-        """Run one text-to-SQL turn and return its structured result.
-
-        The API also accepts ``target_db`` to pin retrieval to one database.
-        It is not exposed here: it exists for benchmarking, the web UI never
-        sends it, and letting the deployment choose is what the semantic layer
-        is for.
+        """Run one structured-data turn and return its structured result.
 
         Args:
             question: The question, in plain language.
@@ -184,12 +184,21 @@ def register(mcp: FastMCP, settings: Settings, client: httpx.AsyncClient) -> Non
                 question while the first is still running.
             evidence: Optional authoritative evidence supplied separately
                 from the question.
+            target_db: Exact configured database scope. In managed agent
+                deployments this is injected from the immutable run scope.
+            prediction: ``True`` forces prediction, ``False`` forces SQL, and
+                ``None`` lets GSF classify. Managed deployments inject this
+                only when the work item already selected a branch.
         """
         body: dict[str, Any] = {"question": question}
         if conversation_id:
             body["conversation_id"] = conversation_id
         if evidence:
             body["evidence"] = evidence
+        if target_db:
+            body["target_db"] = target_db
+        if prediction is not None:
+            body["prediction"] = prediction
 
         answer: DataAnswer | None = None
         steps = 0

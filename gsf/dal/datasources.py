@@ -245,7 +245,9 @@ def _table_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
         "name": row["name"],
+        "database_name": row.get("database_name"),
         "schema_name": row["schema_name"],
+        "table_type": row.get("table_type"),
         "description": row["description"],
         "pk": row["pk"],
     }
@@ -255,14 +257,12 @@ def _table_select():
     return select(
         s.catalog_table.c.id,
         s.catalog_table.c.name,
+        s.catalog_database.c.name.label("database_name"),
         s.catalog_schema.c.name.label("schema_name"),
+        s.catalog_table.c.table_type,
         s.catalog_table.c.description,
         s.catalog_table.c.pk,
-    ).select_from(
-        s.catalog_table.join(
-            s.catalog_schema, s.catalog_table.c.schema_id == s.catalog_schema.c.id
-        )
-    )
+    ).select_from(_table_join())
 
 
 def fetch_sorted_tables() -> list[dict[str, Any]]:
@@ -313,19 +313,37 @@ def fetch_table_by_id(table_id: str) -> dict[str, Any] | None:
     return _table_row(rows[0]) if rows else None
 
 
-def fetch_table_by_name(name: str) -> dict[str, Any] | None:
-    """The first table of that name, in *any* schema or database.
+def fetch_table_by_name(
+    name: str,
+    *,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Resolve a table by name with an optional exact catalog scope.
 
-    Ambiguous by construction: a name is not unique across schemas or
-    databases. Ordered by id so repeated calls agree with each other — which row
-    wins is still arbitrary, but it is the same arbitrary row each time.
+    Legacy unscoped callers retain deterministic first-match behavior. A
+    scoped lookup fails closed when more than one row still matches, preventing
+    prediction from binding a contract to a same-named table elsewhere.
     """
+
+    statement = _table_select().where(s.catalog_table.c.name == name)
+    if database_name is not None:
+        statement = statement.where(s.catalog_database.c.name == database_name)
+    if schema_name is not None:
+        statement = statement.where(s.catalog_schema.c.name == schema_name)
+    scoped = database_name is not None or schema_name is not None
     rows = store().query_read(
-        _table_select()
-        .where(s.catalog_table.c.name == name)
-        .order_by(s.catalog_table.c.id)
-        .limit(1)
+        statement.order_by(s.catalog_table.c.id).limit(2 if scoped else 1)
     )
+    if scoped and len(rows) != 1:
+        if rows:
+            logger.warning(
+                "fetch_table_by_name: scoped table %s.%s.%s is ambiguous",
+                database_name or "*",
+                schema_name or "*",
+                name,
+            )
+        return None
     return _table_row(rows[0]) if rows else None
 
 

@@ -28,6 +28,7 @@ _VARS = (
     "GSF_MCP_TIMEOUT_S",
     "GSF_MCP_CHAT_TIMEOUT_S",
     "GSF_MCP_PUBLIC_URL",
+    "GSF_MCP_TRUSTED_SERVICE_MODE",
 )
 
 
@@ -48,6 +49,7 @@ def test_starts_with_nothing_configured() -> None:
     assert settings.timeout_s == DEFAULT_TIMEOUT_S
     assert settings.chat_timeout_s == DEFAULT_CHAT_TIMEOUT_S
     assert settings.spec_path == DEFAULT_SPEC_PATH
+    assert settings.trusted_service_mode is False
 
 
 def test_holds_no_credential_of_its_own() -> None:
@@ -128,3 +130,20 @@ def test_public_url_can_be_set_explicitly(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("GSF_MCP_PUBLIC_URL", "https://mcp.example/")
 
     assert load_settings().public_url == "https://mcp.example"
+
+
+def test_trusted_service_mode_requires_explicit_opt_in(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GSF_MCP_TRUSTED_SERVICE_MODE", "true")
+
+    assert load_settings().trusted_service_mode is True
+
+
+def test_trusted_service_mode_rejects_ambiguous_values(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GSF_MCP_TRUSTED_SERVICE_MODE", "sometimes")
+
+    with pytest.raises(ConfigError, match="must be true or false"):
+        load_settings()

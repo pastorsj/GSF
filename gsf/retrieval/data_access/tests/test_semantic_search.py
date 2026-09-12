@@ -4,8 +4,8 @@
 
 from typing import Any
 
+from gsf.catalog.constants import Labels
 from gsf.retrieval.data_access import semantic_search
-from nemo_retriever.tabular_data.ingestion.model.reserved_words import Labels
 
 
 class _Retriever:

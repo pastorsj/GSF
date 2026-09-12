@@ -48,22 +48,39 @@ class PqlAnalysisPqlConflict(Exception):
 # ---------------------------------------------------------------------------
 
 
-def list_pql_analyses() -> list[dict[str, Any]]:
-    """Every PqlAnalysis as ``{id, name, description, pql}``, by name."""
-    return [
+def list_pql_analyses(database_name: str | None = None) -> list[dict[str, Any]]:
+    """Every PqlAnalysis, optionally restricted to one database."""
+    statement = select(
+        s.pql_analysis.c.id,
+        s.pql_analysis.c.database_name,
+        s.pql_analysis.c.name,
+        s.pql_analysis.c.description,
+        s.pql_analysis.c.pql,
+    )
+    if database_name is not None:
+        statement = statement.where(
+            s.pql_analysis.c.database_name == database_name
+        )
+    results = [
         dict(r)
         for r in store().query_read(
-            select(
-                s.pql_analysis.c.id,
-                s.pql_analysis.c.name,
-                s.pql_analysis.c.description,
-                s.pql_analysis.c.pql,
-            ).order_by(s.pql_analysis.c.name)
+            statement.order_by(
+                s.pql_analysis.c.database_name, s.pql_analysis.c.name
+            )
         )
     ]
+    for result in results:
+        if result.get("database_name") is None:
+            result.pop("database_name", None)
+    return results
 
 
-def _find_conflict(column, value: str, exclude_id: str | None):
+def _find_conflict(
+    column,
+    value: str,
+    exclude_id: str | None,
+    database_name: str | None = None,
+):
     """Another analysis already using *value* in *column*, or ``None``.
 
     *exclude_id* is the analysis being edited — without it, saving one unchanged
@@ -74,6 +91,10 @@ def _find_conflict(column, value: str, exclude_id: str | None):
     )
     if exclude_id is not None:
         statement = statement.where(s.pql_analysis.c.id != exclude_id)
+    if database_name is not None:
+        statement = statement.where(
+            s.pql_analysis.c.database_name == database_name
+        )
     rows = store().query_read(statement.order_by(s.pql_analysis.c.id).limit(1))
     return {"id": rows[0]["id"], "name": rows[0]["name"]} if rows else None
 
@@ -81,26 +102,40 @@ def _find_conflict(column, value: str, exclude_id: str | None):
 def find_pql_analysis_by_name(
     name: str,
     exclude_id: str | None,
+    database_name: str | None = None,
 ) -> dict[str, str] | None:
-    return _find_conflict(s.pql_analysis.c.name, name, exclude_id)
+    return _find_conflict(
+        s.pql_analysis.c.name, name, exclude_id, database_name
+    )
 
 
 def find_pql_analysis_by_pql(
     pql: str,
     exclude_id: str | None,
+    database_name: str | None = None,
 ) -> dict[str, str] | None:
-    return _find_conflict(s.pql_analysis.c.pql, pql, exclude_id)
+    return _find_conflict(s.pql_analysis.c.pql, pql, exclude_id, database_name)
 
 
-def get_pql_analysis_by_id(analysis_id: str) -> str | None:
+def get_pql_analysis_by_id(
+    analysis_id: str, database_name: str | None = None
+) -> str | None:
     """The analysis id if it exists, else ``None`` — an existence check."""
-    rows = store().query_read(
-        select(s.pql_analysis.c.id).where(s.pql_analysis.c.id == analysis_id).limit(1)
+    statement = select(s.pql_analysis.c.id).where(
+        s.pql_analysis.c.id == analysis_id
     )
+    if database_name is not None:
+        statement = statement.where(
+            (s.pql_analysis.c.database_name == database_name)
+            | s.pql_analysis.c.database_name.is_(None)
+        )
+    rows = store().query_read(statement.limit(1))
     return rows[0]["id"] if rows else None
 
 
-def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, str]]:
+def fetch_pql_analyses_by_ids(
+    analysis_ids: list[str], *, database_name: str | None = None
+) -> dict[str, dict[str, str]]:
     """``{id: {id, name, description, pql}}``.
 
     Values are stripped, and a missing one becomes ``""`` — these go straight
@@ -112,21 +147,29 @@ def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, st
     if not analysis_ids:
         return {}
     try:
-        rows = store().query_read(
-            select(
-                s.pql_analysis.c.id,
-                s.pql_analysis.c.name,
-                s.pql_analysis.c.description,
-                s.pql_analysis.c.pql,
-            ).where(s.pql_analysis.c.id.in_(list(analysis_ids)))
+        statement = select(
+            s.pql_analysis.c.id,
+            s.pql_analysis.c.database_name,
+            s.pql_analysis.c.name,
+            s.pql_analysis.c.description,
+            s.pql_analysis.c.pql,
         )
+        statement = statement.where(
+            s.pql_analysis.c.id.in_(list(analysis_ids))
+        )
+        if database_name is not None:
+            statement = statement.where(
+                s.pql_analysis.c.database_name == database_name
+            )
+        rows = store().query_read(statement)
     except Exception:
         logger.warning("fetch_pql_analyses_by_ids: query failed", exc_info=True)
         return {}
 
-    return {
+    results = {
         row["id"]: {
             "id": row["id"],
+            "database_name": (row["database_name"] or "").strip(),
             "name": (row["name"] or "").strip(),
             "description": (row["description"] or "").strip(),
             "pql": (row["pql"] or "").strip(),
@@ -134,6 +177,10 @@ def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, st
         for row in rows
         if row["id"]
     }
+    for result in results.values():
+        if not result["database_name"]:
+            result.pop("database_name")
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +193,8 @@ def upsert_pql_analysis_node(
     name: str,
     description: str,
     pql: str,
+    *,
+    database_name: str | None = None,
 ) -> None:
     """Create or overwrite an analysis by id.
 
@@ -155,12 +204,17 @@ def upsert_pql_analysis_node(
     have already run.
     """
     statement = insert(s.pql_analysis).values(
-        id=analysis_id, name=name, description=description, pql=pql
+        id=analysis_id,
+        database_name=database_name,
+        name=name,
+        description=description,
+        pql=pql,
     )
     store().query_write(
         statement.on_conflict_do_update(
             index_elements=[s.pql_analysis.c.id],
             set_={
+                "database_name": statement.excluded.database_name,
                 "name": statement.excluded.name,
                 "description": statement.excluded.description,
                 "pql": statement.excluded.pql,
@@ -190,7 +244,10 @@ def _pql_analysis_docs(analysis_id: str | None) -> list[dict[str, Any]]:
     away from the question a user actually asks.
     """
     statement = select(
-        s.pql_analysis.c.id, s.pql_analysis.c.name, s.pql_analysis.c.description
+        s.pql_analysis.c.id,
+        s.pql_analysis.c.database_name,
+        s.pql_analysis.c.name,
+        s.pql_analysis.c.description,
     )
     if analysis_id is not None:
         statement = statement.where(s.pql_analysis.c.id == analysis_id)
@@ -201,7 +258,10 @@ def _pql_analysis_docs(analysis_id: str | None) -> list[dict[str, Any]]:
         text = row["name"]
         if description is not None and str(description).strip():
             text += f": {description}"
-        docs.append({"text": text, "name": row["name"], "id": row["id"]})
+        document = {"text": text, "name": row["name"], "id": row["id"]}
+        if row["database_name"] is not None:
+            document["database_name"] = row["database_name"]
+        docs.append(document)
     return docs
 
 
@@ -236,7 +296,7 @@ def embed_pql_analyses(
             "label": _LABEL,
             "name": item.get("name", ""),
             "source_path": path,
-            "database_name": database_name,
+            "database_name": item.get("database_name") or database_name,
         }
         rows.append(
             {

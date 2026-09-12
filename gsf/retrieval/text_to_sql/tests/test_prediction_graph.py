@@ -6,11 +6,11 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from gsf.catalog.constants import TableTypes
 from gsf.retrieval.kumo.graph_contract import GraphContract
 from gsf.retrieval.kumo.graph_contract import GraphContractTable
 from gsf.retrieval.text_to_sql.agents.prediction_graph import _contract_relevant_tables
 from gsf.retrieval.text_to_sql.agents.prediction_graph import _enrich_relevant_tables
-from nemo_retriever.tabular_data.ingestion.model.reserved_words import TableTypes
 
 
 @patch("gsf.retrieval.text_to_sql.agents.prediction_graph.fetch_table_by_name")

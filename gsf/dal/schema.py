@@ -613,6 +613,7 @@ pql_analysis = Table(
     "pql_analysis",
     METADATA,
     _id(),
+    Column("database_name", Text, nullable=True, index=True),
     Column("name", Text, nullable=False),
     Column("description", Text, nullable=True),
     Column("pql", Text, nullable=True),

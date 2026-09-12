@@ -38,10 +38,10 @@ def test_create_scopes_conflicts_storage_and_response_to_database(
     )
     mock_upsert.assert_called_once_with(
         "analysis-id",
-        "prediction_db",
         "Predict delay",
         "Reviewed",
         "PREDICT delay FOR entities",
+        database_name="prediction_db",
     )
-    mock_embed.assert_called_once_with("analysis-id")
+    mock_embed.assert_called_once_with("analysis-id", "prediction_db")
     assert result["database_name"] == "prediction_db"

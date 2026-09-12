@@ -166,6 +166,15 @@ class CallerAuth(httpx.Auth):
         yield request
 
 
+class TrustedServiceAuth(httpx.Auth):
+    """Remove caller credentials on the private service-to-service path."""
+
+    def auth_flow(self, request: httpx.Request):  # type: ignore[override]
+        for name in (API_KEY_HEADER, BEARER_HEADER):
+            request.headers.pop(name, None)
+        yield request
+
+
 def build_client(settings: Settings) -> httpx.AsyncClient:
     """HTTP client for the public GSF API.
 
@@ -174,7 +183,7 @@ def build_client(settings: Settings) -> httpx.AsyncClient:
     """
     return httpx.AsyncClient(
         base_url=settings.api_url,
-        auth=CallerAuth(),
+        auth=TrustedServiceAuth() if settings.trusted_service_mode else CallerAuth(),
         timeout=settings.timeout_s,
         # An agent harness may fan out across several tools at once.
         limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
@@ -203,18 +212,25 @@ def build_server(settings: Settings) -> tuple[FastMCP, httpx.AsyncClient]:
         instructions=INSTRUCTIONS,
         version=get_version(),
         icons=load_icons(),
-        auth=build_gsf_auth(settings),
+        auth=None if settings.trusted_service_mode else build_gsf_auth(settings),
     )
 
     chat.register(mcp, settings, client)
     readiness.register(mcp, settings, client)
 
-    logger.info(
-        "GSF MCP server built against %s (spec: %s). Callers sign in against "
-        "that GSF deployment; this server holds no credentials.",
-        settings.api_url,
-        settings.spec_path,
-    )
+    if settings.trusted_service_mode:
+        logger.warning(
+            "GSF MCP trusted-service mode is active against %s; keep this "
+            "listener on the deployment's private network.",
+            settings.api_url,
+        )
+    else:
+        logger.info(
+            "GSF MCP server built against %s (spec: %s). Callers sign in "
+            "against that GSF deployment; this server holds no credentials.",
+            settings.api_url,
+            settings.spec_path,
+        )
     return mcp, client
 
 
@@ -225,6 +241,7 @@ __all__ = [
     "INSTRUCTIONS",
     "SERVER_NAME",
     "CallerAuth",
+    "TrustedServiceAuth",
     "build_client",
     "build_server",
     "load_icons",

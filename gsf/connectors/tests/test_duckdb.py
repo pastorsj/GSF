@@ -6,9 +6,9 @@ import json
 
 import duckdb
 import pytest
+from gsf.catalog.constants import TableTypes
 from gsf.connectors.duckdb import DuckDBDatabase
 from gsf.retrieval.kumo.graph_contract import GraphContractError
-from nemo_retriever.tabular_data.ingestion.model.reserved_words import TableTypes
 
 
 def _write_graph_contract(path, database_name: str, *, table_name: str = "events") -> None:

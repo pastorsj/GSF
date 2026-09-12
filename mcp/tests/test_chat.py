@@ -320,13 +320,48 @@ def test_forwards_evidence_separately_from_question() -> None:
     }
 
 
-def test_the_database_cannot_be_pinned_by_a_caller() -> None:
-    # target_db exists on the API for benchmarking. Exposing it would invite an
-    # agent to route around the semantic layer, so the tool has no such
-    # parameter and a caller passing one is rejected rather than silently
-    # ignored.
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
-        raise AssertionError("the request should never be sent")
+@pytest.mark.parametrize("prediction", [True, False])
+def test_forwards_explicit_database_and_prediction_scope(prediction: bool) -> None:
+    captured: dict[str, Any] = {}
 
-    with pytest.raises(ToolError):
-        _call(_server(handler), {"question": "how many?", "target_db": "sales"})
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_sse({"type": "result", "answer": _ANSWER}).encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    _call(
+        _server(handler),
+        {
+            "question": "forecast churn",
+            "target_db": "sales",
+            "prediction": prediction,
+        },
+    )
+
+    assert captured == {
+        "question": "forecast churn",
+        "target_db": "sales",
+        "prediction": prediction,
+    }
+
+
+def test_omits_unset_prediction_so_gsf_can_classify() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_sse({"type": "result", "answer": _ANSWER}).encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    _call(
+        _server(handler),
+        {"question": "what changed?", "target_db": "sales", "prediction": None},
+    )
+
+    assert captured == {"question": "what changed?", "target_db": "sales"}

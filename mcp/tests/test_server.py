@@ -25,6 +25,7 @@ from gsf_mcp.server import (
     ICON_PATH,
     INSTRUCTIONS,
     CallerAuth,
+    TrustedServiceAuth,
     build_client,
     build_server,
     load_icons,
@@ -244,6 +245,30 @@ def test_a_request_with_no_signed_in_session_is_an_actionable_error(
 
     with pytest.raises(ToolError, match="Sign in again"):
         _sent_headers(CallerAuth())
+
+
+def test_trusted_service_mode_strips_any_smuggled_identity() -> None:
+    headers = _sent_headers(
+        TrustedServiceAuth(),
+        {
+            "authorization": "Bearer someone-else",
+            "x-api-key": "gsf_someone-else",
+        },
+    )
+
+    assert "authorization" not in headers
+    assert "x-api-key" not in headers
+
+
+def test_trusted_service_mode_disables_public_oauth() -> None:
+    settings = _settings()
+    settings = Settings(**{**settings.__dict__, "trusted_service_mode": True})
+
+    mcp, client = build_server(settings)
+    try:
+        assert mcp.auth is None
+    finally:
+        asyncio.run(client.aclose())
 
 
 def test_rejects_a_spec_that_is_not_json(tmp_path: Path) -> None:

@@ -32,6 +32,7 @@ import duckdb
 import pandas as pd
 from typing import Optional
 
+from gsf.catalog.constants import TableTypes
 from gsf.connectors.base import SQLDatabase
 
 logger = logging.getLogger(__name__)
@@ -102,13 +103,19 @@ class DuckDBDatabase(SQLDatabase):
     # ------------------------------------------------------------------
 
     def get_tables(self) -> pd.DataFrame:
-        """Return all tables from information_schema as a DataFrame."""
+        """Return base tables and views with their canonical catalog type."""
         return self.execute(
-            """
+            f"""
             SELECT
                 table_schema,
-                table_name
+                table_name,
+                CASE table_type
+                    WHEN 'VIEW' THEN '{TableTypes.VIEW}'
+                    WHEN 'MATERIALIZED VIEW' THEN '{TableTypes.MATERIALIZED_VIEW}'
+                    ELSE '{TableTypes.BASE_TABLE}'
+                END AS table_type
             FROM information_schema.tables
+            WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
             ORDER BY table_schema, table_name
         """
         )
@@ -161,10 +168,121 @@ class DuckDBDatabase(SQLDatabase):
         )
 
     def get_pks(self) -> pd.DataFrame:
-        return pd.DataFrame()
+        """Return physical keys plus reviewed identities for governed views."""
+
+        physical = self.execute(
+            """
+            SELECT
+                constraints.schema_name AS table_schema,
+                constraints.table_name,
+                key_column.column_name,
+                key_column.ordinal_position
+            FROM duckdb_constraints() AS constraints,
+                 UNNEST(constraints.constraint_column_names) WITH ORDINALITY
+                    AS key_column(column_name, ordinal_position)
+            WHERE constraints.constraint_type = 'PRIMARY KEY'
+            ORDER BY constraints.schema_name,
+                     constraints.table_name,
+                     key_column.ordinal_position
+            """
+        )
+        governed = self._get_governed_view_pks()
+        if governed.empty:
+            return physical
+        return (
+            pd.concat([physical, governed], ignore_index=True)
+            .drop_duplicates(
+                subset=["table_schema", "table_name", "column_name"],
+                keep="first",
+            )
+            .sort_values(
+                ["table_schema", "table_name", "ordinal_position"],
+                ignore_index=True,
+            )
+        )
+
+    def _get_governed_view_pks(self) -> pd.DataFrame:
+        """Materialize contract-owned view identities as ingestion PK rows."""
+
+        from gsf.retrieval.kumo.graph_contract import GraphContractError
+        from gsf.retrieval.kumo.graph_contract import load_graph_contracts
+
+        fields = ["table_schema", "table_name", "column_name", "ordinal_position"]
+        contract = next(
+            (
+                item
+                for item in load_graph_contracts()
+                if item.database_name.casefold() == self.database_name.casefold()
+            ),
+            None,
+        )
+        if contract is None:
+            return pd.DataFrame(columns=fields)
+
+        tables = {
+            (str(row.table_schema).casefold(), str(row.table_name).casefold()): str(
+                row.table_type
+            )
+            for row in self.get_tables().itertuples(index=False)
+        }
+        columns = {
+            (
+                str(row.table_schema).casefold(),
+                str(row.table_name).casefold(),
+                str(row.column_name).casefold(),
+            )
+            for row in self.get_columns().itertuples(index=False)
+        }
+        rows: list[dict[str, object]] = []
+        for table in contract.tables:
+            path = (table.schema_name.casefold(), table.name.casefold())
+            if tables.get(path, "").casefold() != TableTypes.VIEW.casefold():
+                raise GraphContractError(
+                    "governed DuckDB object "
+                    f"{contract.database_name}.{table.schema_name}.{table.name} "
+                    "must exist as a VIEW before ingestion"
+                )
+            for ordinal, column_name in enumerate(table.primary_key, start=1):
+                if (*path, column_name.casefold()) not in columns:
+                    raise GraphContractError(
+                        "governed DuckDB view "
+                        f"{contract.database_name}.{table.schema_name}.{table.name} "
+                        f"has no primary-key column {column_name!r}"
+                    )
+                rows.append(
+                    {
+                        "table_schema": table.schema_name,
+                        "table_name": table.name,
+                        "column_name": column_name,
+                        "ordinal_position": ordinal,
+                    }
+                )
+        return pd.DataFrame(rows, columns=fields)
 
     def get_fks(self) -> pd.DataFrame:
-        return pd.DataFrame()
+        """Return physical foreign-key pairs, including composite keys."""
+
+        return self.execute(
+            """
+            SELECT
+                constraints.schema_name AS table_schema,
+                constraints.table_name,
+                source_column.column_name,
+                constraints.schema_name AS referenced_schema,
+                constraints.referenced_table,
+                target_column.column_name AS referenced_column
+            FROM duckdb_constraints() AS constraints,
+                 UNNEST(constraints.constraint_column_names) WITH ORDINALITY
+                    AS source_column(column_name, ordinal_position),
+                 UNNEST(constraints.referenced_column_names) WITH ORDINALITY
+                    AS target_column(column_name, ordinal_position)
+            WHERE constraints.constraint_type = 'FOREIGN KEY'
+              AND source_column.ordinal_position = target_column.ordinal_position
+            ORDER BY constraints.schema_name,
+                     constraints.table_name,
+                     source_column.ordinal_position
+            """
+        )
 
     # ------------------------------------------------------------------
     # Context manager / cleanup

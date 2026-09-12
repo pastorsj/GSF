@@ -123,7 +123,7 @@ underlying databases.
 
 | Tool | What it is for |
 | --- | --- |
-| `ask_question` | **The primary tool.** Ask a question in plain language; get the answer, the SQL GSF ran, and the rows. |
+| `ask_question` | **The primary tool.** Ask a question in plain language; get the answer, the SQL or PQL GSF ran, and the rows. |
 | `check_answerable` | Grade whether the semantic layer covers a question. Cheap pre-flight before `ask_question`. |
 | `check_readiness` | Whether this deployment can answer anything at all. |
 | `search_terms` | Search the business glossary. |
@@ -146,10 +146,10 @@ reach straight for `ask_question`.
 ### About `ask_question`
 
 It is a call to `POST /api/chat/completions`, the same endpoint the web UI uses,
-which runs the full text-to-SQL agent: many sequential model calls, typically
-tens of seconds. It returns the answer, the SQL, and the rows as separate fields
-rather than the markdown the UI receives, so an agent can use the SQL without
-parsing prose. Results are capped at 100 rows, with `row_count` and `truncated`
+which runs the full structured-data agent: many sequential model calls, typically
+tens of seconds. It returns the answer, the SQL or PQL, and the rows as separate
+fields rather than the markdown the UI receives, so an agent can use the query
+without parsing prose. Results are capped at 100 rows, with `row_count` and `truncated`
 reporting what was withheld. It emits MCP progress notifications as the agent
 works, mirroring the reasoning trace the web UI shows.
 

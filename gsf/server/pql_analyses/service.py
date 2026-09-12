@@ -38,7 +38,7 @@ __all__ = [
 ]
 
 
-def _embed(analysis_id: str) -> None:
+def _embed(analysis_id: str, database_name: str) -> None:
     from gsf.utils import get_embed_params
     from gsf.vdb import get_semantic_vdb
 
@@ -46,6 +46,7 @@ def _embed(analysis_id: str) -> None:
         embed_params=get_embed_params(),
         vdb=get_semantic_vdb(),
         analysis_id=analysis_id,
+        database_name=database_name,
     )
 
 
@@ -74,8 +75,14 @@ def create_pql_analysis(
         )
 
     analysis_id = str(uuid.uuid4())
-    upsert_pql_analysis_node(analysis_id, database_name, name, description, pql)
-    _embed(analysis_id)
+    upsert_pql_analysis_node(
+        analysis_id,
+        name,
+        description,
+        pql,
+        database_name=database_name,
+    )
+    _embed(analysis_id, database_name)
 
     return {
         "id": analysis_id,
@@ -113,12 +120,18 @@ def update_pql_analysis(
             f"this PQL is already used by PqlAnalysis {pql_conflict['name']!r} (id={pql_conflict['id']!r})",
         )
 
-    upsert_pql_analysis_node(analysis_id, database_name, name, description, pql)
+    upsert_pql_analysis_node(
+        analysis_id,
+        name,
+        description,
+        pql,
+        database_name=database_name,
+    )
 
     from gsf.vdb import get_semantic_vdb
 
     get_semantic_vdb().delete_by_id(analysis_id)
-    _embed(analysis_id)
+    _embed(analysis_id, database_name)
 
     return {
         "id": analysis_id,

@@ -67,6 +67,9 @@ class Settings:
     # the server names for itself is the one they dialled — so a bind address
     # that is not how anyone addresses it needs this set explicitly.
     public_url: str = ""
+    # Explicit machine-to-machine mode for a sidecar on GSF's trusted private
+    # network. The default remains per-caller GSF OAuth.
+    trusted_service_mode: bool = False
 
 
 def _positive_float(name: str, default: float) -> float:
@@ -93,6 +96,18 @@ def _port(name: str, default: int) -> int:
     if not 1 <= value <= 65535:
         raise ConfigError(f"{name} must be a valid port, got {value}")
     return value
+
+
+def _boolean(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{name} must be true or false, got {raw!r}")
 
 
 def _public_url(host: str, port: int) -> str:
@@ -140,6 +155,7 @@ def load_settings() -> Settings:
             "GSF_MCP_CHAT_TIMEOUT_S", DEFAULT_CHAT_TIMEOUT_S
         ),
         public_url=_public_url(host, port),
+        trusted_service_mode=_boolean("GSF_MCP_TRUSTED_SERVICE_MODE"),
     )
 
 
