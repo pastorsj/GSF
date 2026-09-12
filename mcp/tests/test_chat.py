@@ -104,7 +104,7 @@ def test_returns_answer_sql_and_rows() -> None:
     assert result.data.rows == [{"count": 42}]
     assert result.data.row_count == 1
     assert result.data.truncated is False
-    assert "found the customers table" in result.data.reasoning
+    assert not hasattr(result.data, "reasoning")
 
 
 def test_forwards_agent_steps_as_progress() -> None:
@@ -134,7 +134,42 @@ def test_forwards_agent_steps_as_progress() -> None:
 
     _call(mcp, {"question": "q"}, progress=on_progress)
 
-    assert seen == ["Retrieving context", "Writing SQL: joining orders"]
+    assert seen == [
+        "Processing structured-data step",
+        "Processing structured-data step",
+    ]
+
+
+def test_raw_backend_thoughts_never_cross_the_mcp_boundary() -> None:
+    sentinel = "PRIVATE-CHAIN-OF-THOUGHT-SENTINEL"
+    seen: list[str] = []
+
+    async def on_progress(
+        progress: float, total: float | None, message: str | None
+    ) -> None:
+        del progress, total
+        seen.append(message or "")
+
+    answer = dict(_ANSWER, thoughts=sentinel)
+    mcp = _server(
+        _stream(
+            _sse(
+                {
+                    "type": "step",
+                    "node": "construct_sql_from_candidates",
+                    "label": sentinel,
+                    "thought": sentinel,
+                },
+                {"type": "result", "answer": answer},
+            )
+        )
+    )
+
+    result = _call(mcp, {"question": "q"}, progress=on_progress)
+
+    assert seen == ["Constructing query"]
+    assert sentinel not in repr(result.data)
+    assert sentinel not in repr(seen)
 
 
 def test_returns_the_rows_from_a_real_backend_payload() -> None:

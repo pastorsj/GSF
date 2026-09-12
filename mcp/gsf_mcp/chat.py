@@ -11,8 +11,8 @@ tools and has nothing useful to say about a stream.
 
 Streaming is not merely an obstacle here. A run is many sequential model calls
 and routinely takes tens of seconds, which is long enough that a silent tool
-looks hung, so the step events are forwarded as MCP progress notifications and
-the caller sees the same reasoning trace the web UI shows.
+looks hung, so step boundaries are forwarded as finite, non-reasoning progress
+labels.
 
 The response the UI receives is markdown with fenced SQL, shaped for a renderer.
 This returns the parts separately instead, so a calling agent can use the SQL
@@ -41,6 +41,25 @@ MAX_ROWS = 100
 
 _SSE_DATA_PREFIX = "data:"
 _SSE_DONE = "[DONE]"
+_SAFE_PROGRESS_LABELS = {
+    "question_extraction": "Understanding the question",
+    "classify_prediction": "Checking the query path",
+    "prepare_prediction_graph": "Preparing prediction",
+    "kumo_predict": "Running prediction",
+    "retrieve_candidates": "Retrieving ontology candidates",
+    "prepare_candidates": "Preparing ontology candidates",
+    "precheck_combined": "Checking joins and filter values",
+    "construct_sql_from_candidates": "Constructing query",
+    "reconstruct_sql": "Repairing query",
+    "validate_sql_query": "Validating query",
+    "validate_intent": "Validating requested outcome",
+    "execute_sql_query": "Executing query",
+    "check_empty_like_result": "Checking results",
+    "check_value_repair": "Checking values",
+    "format_and_respond": "Formatting response",
+    "unconstructable_sql_response": "Query could not be constructed",
+}
+_UNKNOWN_PROGRESS_LABEL = "Processing structured-data step"
 
 
 class DataAnswer(BaseModel):
@@ -60,10 +79,6 @@ class DataAnswer(BaseModel):
     )
     truncated: bool = Field(
         default=False, description=f"True when more than {MAX_ROWS} rows matched."
-    )
-    reasoning: str = Field(
-        default="",
-        description="What the agent did, one line per step it took.",
     )
 
 
@@ -101,7 +116,6 @@ def _build_answer(payload: dict[str, Any]) -> DataAnswer:
         rows=rows[:MAX_ROWS],
         row_count=len(rows),
         truncated=len(rows) > MAX_ROWS,
-        reasoning=str(payload.get("thoughts") or ""),
     )
 
 
@@ -221,13 +235,16 @@ def register(mcp: FastMCP, settings: Settings, client: httpx.AsyncClient) -> Non
                     kind = event.get("type")
                     if kind == "step":
                         steps += 1
-                        label = event.get("label") or event.get("node") or "working"
-                        thought = event.get("thought")
+                        node = event.get("node")
+                        label = _SAFE_PROGRESS_LABELS.get(
+                            node if isinstance(node, str) else "",
+                            _UNKNOWN_PROGRESS_LABEL,
+                        )
                         # No total: the graph's path depends on the question,
                         # so the step count is not known ahead of time.
                         await ctx.report_progress(
                             progress=steps,
-                            message=f"{label}: {thought}" if thought else str(label),
+                            message=label,
                         )
                     elif kind == "result":
                         answer = _build_answer(event.get("answer") or {})
