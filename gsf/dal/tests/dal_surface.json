@@ -59,7 +59,7 @@
     "fetch_schemas_for_database": "(db_id: 'str', zone_ids: 'list[str] | None' = None) -> 'dict[str, Any] | None'",
     "fetch_sorted_tables": "() -> 'list[dict[str, Any]]'",
     "fetch_table_by_id": "(table_id: 'str') -> 'dict[str, Any] | None'",
-    "fetch_table_by_name": "(name: 'str') -> 'dict[str, Any] | None'",
+    "fetch_table_by_name": "(name: 'str', *, database_name: 'str | None' = None, schema_name: 'str | None' = None) -> 'dict[str, Any] | None'",
     "fetch_table_context": "(table_id: 'str') -> 'dict[str, Any]'",
     "fetch_tables_and_columns_by_node_ids": "(node_ids: 'list[str]') -> 'tuple[pd.DataFrame, pd.DataFrame, str]'",
     "fetch_tables_by_ids": "(table_ids: 'list[str]') -> 'list[dict[str, Any]]'",
@@ -101,19 +101,21 @@
     "PqlAnalysisNameConflict": "class(Exception)",
     "PqlAnalysisPqlConflict": "class(Exception)",
     "delete_pql_analysis_node": "(analysis_id: 'str') -> 'None'",
-    "embed_pql_analyses": "(embed_params: \"'EmbedParams'\", vdb: \"'VDB'\", analysis_id: 'str | None' = None, database_name: 'str | None' = None) -> 'None'",
-    "fetch_pql_analyses_by_ids": "(analysis_ids: 'list[str]') -> 'dict[str, dict[str, str]]'",
-    "find_pql_analysis_by_name": "(name: 'str', exclude_id: 'str | None') -> 'dict[str, str] | None'",
-    "find_pql_analysis_by_pql": "(pql: 'str', exclude_id: 'str | None') -> 'dict[str, str] | None'",
-    "get_pql_analysis_by_id": "(analysis_id: 'str') -> 'str | None'",
-    "list_pql_analyses": "() -> 'list[dict[str, Any]]'",
-    "upsert_pql_analysis_node": "(analysis_id: 'str', name: 'str', description: 'str', pql: 'str') -> 'None'"
+    "embed_pql_analyses": "(embed_params: \"'EmbedParams'\", vdb: \"'VDB'\", analysis_id: 'str | None' = None) -> 'None'",
+    "fetch_pql_analyses_by_ids": "(analysis_ids: 'list[str]', *, database_name: 'str') -> 'dict[str, dict[str, str]]'",
+    "find_pql_analysis_by_name": "(name: 'str', exclude_id: 'str | None', database_name: 'str') -> 'dict[str, str] | None'",
+    "find_pql_analysis_by_pql": "(pql: 'str', exclude_id: 'str | None', database_name: 'str') -> 'dict[str, str] | None'",
+    "get_pql_analysis_by_id": "(analysis_id: 'str', database_name: 'str | None' = None) -> 'str | None'",
+    "list_pql_analyses": "(database_name: 'str | None' = None) -> 'list[dict[str, Any]]'",
+    "upsert_pql_analysis_node": "(analysis_id: 'str', database_name: 'str', name: 'str', description: 'str', pql: 'str') -> 'None'"
   },
   "reset": {
     "ResetResult": "class(object)",
+    "RetiredDatabaseResult": "class(object)",
     "delete_all_data": "(database_name: 'str | None' = None) -> 'ResetResult'",
     "delete_data_layer": "(database_name: 'str | None' = None) -> 'int'",
-    "delete_semantic_layer": "(database_name: 'str | None' = None) -> 'int'"
+    "delete_semantic_layer": "(database_name: 'str | None' = None) -> 'int'",
+    "retire_database_alias": "(database_name: 'str', *, successor_database_name: 'str') -> 'RetiredDatabaseResult'"
   },
   "rules": {
     "count_rules": "(*, search: 'str | None' = None) -> 'int'",

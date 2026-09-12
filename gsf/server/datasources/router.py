@@ -6,26 +6,29 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Path, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter
+from fastapi import HTTPException
+from fastapi import Path
+from fastapi import Query
+from pydantic import BaseModel
+from pydantic import Field
 
 from gsf.server.custom_analyses import service as custom_analyses_dal
 from gsf.server.datasources import service as dal
-from gsf.server.pagination import LIMIT_QUERY, SKIP_QUERY
-from gsf.server.pql_analyses import service as pql_analyses_dal
 from gsf.server.models import NodeUpdateResult
-from gsf.server.responses import (
-    CustomAnalysisListResponse,
-    CustomAnalysisResponse,
-    DatabaseListResponse,
-    IdResponse,
-    PqlAnalysisListResponse,
-    PqlAnalysisResponse,
-    SchemasPayload,
-    SqlValidationResponse,
-    TableColumnsPageResponse,
-    TableListResponse,
-)
+from gsf.server.pagination import LIMIT_QUERY
+from gsf.server.pagination import SKIP_QUERY
+from gsf.server.pql_analyses import service as pql_analyses_dal
+from gsf.server.responses import CustomAnalysisListResponse
+from gsf.server.responses import CustomAnalysisResponse
+from gsf.server.responses import DatabaseListResponse
+from gsf.server.responses import IdResponse
+from gsf.server.responses import PqlAnalysisListResponse
+from gsf.server.responses import PqlAnalysisResponse
+from gsf.server.responses import SchemasPayload
+from gsf.server.responses import SqlValidationResponse
+from gsf.server.responses import TableColumnsPageResponse
+from gsf.server.responses import TableListResponse
 
 
 class NodeUpdate(BaseModel):
@@ -45,6 +48,12 @@ class CustomAnalysisCreate(BaseModel):
 
 
 class PqlAnalysisCreate(BaseModel):
+    database_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+    )
     name: str = Field(..., min_length=1)
     description: str
     pql: str = Field(..., min_length=1)
@@ -256,9 +265,11 @@ def delete_custom_analysis(analysis_id: str) -> dict:
 
 
 @router.get("/pql-analyses", response_model=PqlAnalysisListResponse)
-def list_pql_analyses() -> dict:
-    """All PqlAnalysis nodes ``{id, name, description, pql}``."""
-    return _count_payload(pql_analyses_dal.list_pql_analyses())
+def list_pql_analyses(
+    database_name: str | None = Query(default=None, min_length=1, max_length=128),
+) -> dict:
+    """PqlAnalysis nodes, optionally scoped to one database."""
+    return _count_payload(pql_analyses_dal.list_pql_analyses(database_name))
 
 
 @router.post("/pql-analyses", status_code=201, response_model=PqlAnalysisResponse)
@@ -271,6 +282,7 @@ def create_pql_analysis(body: PqlAnalysisCreate) -> dict:
     """
     try:
         row = pql_analyses_dal.create_pql_analysis(
+            database_name=body.database_name,
             name=body.name,
             description=body.description,
             pql=body.pql,
@@ -293,6 +305,7 @@ def update_pql_analysis(analysis_id: str, body: PqlAnalysisCreate) -> dict:
     try:
         row = pql_analyses_dal.update_pql_analysis(
             analysis_id=analysis_id,
+            database_name=body.database_name,
             name=body.name,
             description=body.description,
             pql=body.pql,

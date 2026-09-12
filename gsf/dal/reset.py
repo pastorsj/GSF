@@ -16,15 +16,17 @@ Two consequences worth knowing:
 * **Deletes never cross a database.** Foreign keys point downward within one
   database, so resetting one cannot reach another's data — including through a
   Term the two share, which survives.
-* **A scoped semantic reset does not reach ``PqlAnalysis``.** Nothing connects
-  one to a database, so there is no scope to match it by. A scoped reset
-  silently deleting every predictive analysis in the deployment would be a
-  worse surprise than the gap.
+* **A scoped semantic reset reaches only owned ``PqlAnalysis`` rows.** Reviewed
+  predictive examples carry their database name directly, so resetting one
+  source cannot remove another source's examples.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
+from dataclasses import asdict
 from dataclasses import dataclass
 
 from sqlalchemy import delete, select, union
@@ -43,6 +45,17 @@ class ResetResult:
     #: ``None`` when the reset covered every database, matching
     #: ``delete_all_data``'s own optional argument.
     database_name: str | None
+    data_rows: int
+    semantic_rows: int
+
+
+@dataclass
+class RetiredDatabaseResult:
+    """Summary of retiring one exact, already-migrated database alias."""
+
+    database_name: str
+    successor_database_name: str
+    catalog_nodes: int
     data_rows: int
     semantic_rows: int
 
@@ -79,9 +92,8 @@ def _delete_scoped_semantic(database_name: str) -> int:
     same reason inverted: a Term shared with another database is that other
     database's data too, and a reset of this one must not take it.
 
-    ``PqlAnalysis``, ``TextAttribute`` and ``Analysis`` are absent here on
-    purpose: nothing connects them to a database, so there is no scope that
-    would select them.
+    ``TextAttribute`` and ``Analysis`` are absent here on purpose: nothing
+    connects them to a database, so there is no scope that would select them.
     """
     tables = _table_ids(database_name)
     deleted = 0
@@ -118,6 +130,15 @@ def _delete_scoped_semantic(database_name: str) -> int:
             delete(s.column_attribute)
             .where(s.column_attribute.c.table_id.in_(tables))
             .returning(s.column_attribute.c.id)
+        )
+    )
+
+    # PQL few-shots carry their reviewed prediction database directly.
+    deleted += len(
+        store().query_write(
+            delete(s.pql_analysis)
+            .where(s.pql_analysis.c.database_name == database_name)
+            .returning(s.pql_analysis.c.id)
         )
     )
 
@@ -394,3 +415,104 @@ def delete_all_data(database_name: str | None = None) -> ResetResult:
         result.semantic_rows,
     )
     return result
+
+
+def retire_database_alias(
+    database_name: str,
+    *,
+    successor_database_name: str,
+) -> RetiredDatabaseResult:
+    """Remove an empty legacy database after replace-import reparenting.
+
+    In the relational catalog a schema has exactly one database parent. A
+    replace-model import first moves stable schema rows to the successor; this
+    function then proves the successor exists and the retired database owns no
+    remaining schemas before deleting only that alias and its vector rows.
+    """
+    retired = database_name.strip()
+    successor = successor_database_name.strip()
+    if not retired or not successor:
+        raise ValueError("Retired and successor database names must be nonempty.")
+    if retired.casefold() == successor.casefold():
+        raise ValueError("Retired and successor database names must differ.")
+
+    with write_transaction():
+        retired_rows = store().query_read(
+            select(s.catalog_database.c.id).where(s.catalog_database.c.name == retired)
+        )
+        successor_rows = store().query_read(
+            select(s.catalog_database.c.id).where(
+                s.catalog_database.c.name == successor
+            )
+        )
+        if len(retired_rows) > 1:
+            raise RuntimeError(f"Found multiple catalog databases named {retired!r}.")
+        if retired_rows and len(successor_rows) != 1:
+            raise RuntimeError(
+                f"Cannot retire {retired!r}: successor {successor!r} does not exist."
+            )
+
+        if retired_rows:
+            schemas = store().query_read(
+                select(s.catalog_schema.c.id, s.catalog_schema.c.name).where(
+                    s.catalog_schema.c.database_id == retired_rows[0]["id"]
+                )
+            )
+            if schemas:
+                names = ", ".join(
+                    sorted(str(row.get("name") or row["id"]) for row in schemas)
+                )
+                raise RuntimeError(
+                    f"Cannot retire {retired!r}: schema(s) have not migrated "
+                    f"to {successor!r}: {names}."
+                )
+            store().query_write(
+                delete(s.catalog_database).where(
+                    s.catalog_database.c.id == retired_rows[0]["id"]
+                )
+            )
+
+    data_rows = len(get_data_vdb().delete_by_database(retired))
+    semantic_rows = len(get_semantic_vdb().delete_by_database(retired))
+    result = RetiredDatabaseResult(
+        database_name=retired,
+        successor_database_name=successor,
+        catalog_nodes=1 if retired_rows else 0,
+        data_rows=data_rows,
+        semantic_rows=semantic_rows,
+    )
+    logger.info(
+        "retire_database_alias: removed database alias %s after migration to %s "
+        "(%d data embeddings, %d semantic embeddings)",
+        retired,
+        successor,
+        data_rows,
+        semantic_rows,
+    )
+    return result
+
+
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run narrowly scoped GSF catalog maintenance."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    retire = subparsers.add_parser(
+        "retire-database",
+        help="Remove an obsolete database alias after a replace-model import.",
+    )
+    retire.add_argument("--database-name", required=True)
+    retire.add_argument("--successor-database-name", required=True)
+    args = parser.parse_args(argv)
+    if args.command == "retire-database":
+        result = retire_database_alias(
+            args.database_name,
+            successor_database_name=args.successor_database_name,
+        )
+        print(json.dumps(asdict(result), sort_keys=True))
+        return 0
+    raise AssertionError(f"Unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

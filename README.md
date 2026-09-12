@@ -66,6 +66,18 @@ setup is to fill in `DEFAULT_MODELS_*` and override per-triplet fields only wher
 they differ (e.g. `EMBED_MODEL`, `NON_REASONING_MODEL`). `*_API_KEY` also falls
 back to the legacy `NVIDIA_API_KEY` for backward compatibility.
 
+### Kumo graph prediction scope
+
+A Kumo graph contract may declare one optional `prediction_scope`. Its
+`anchor_time` is the single governed temporal boundary for the graph and applies
+to every temporal PQL evaluated against that graph. The population fields are
+entity-specific: they constrain predictions only when `FOR EACH` names the
+declared entity table and primary key. Predictions for another entity use that
+same graph anchor but retain their explicit or full graph-backed entity scope.
+Contracts without `prediction_scope` keep the legacy anchor and population
+behavior. Public graph receipts expose the population view and count, but never
+entity identifiers or an unkeyed population digest.
+
 ## Deployment
 
 ### Prerequisites

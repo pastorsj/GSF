@@ -842,6 +842,28 @@ def _resolve_entities_batch(
     return result
 
 
+def _restore_resolved_entity_properties(
+    table,
+    items: list[tuple[str, dict[str, Any]]],
+    results: dict[str, tuple[str, bool]],
+) -> None:
+    """Restore import properties on stable rows during a replace import.
+
+    ``_resolve_entities_batch`` deliberately preserves an existing row when an
+    imported id resolves to it. In replace mode, identity remains stable but
+    the reviewed document owns the row's current properties and parent. This
+    update is also what reparents an imported schema to a renamed database
+    without duplicating either object.
+    """
+    for imported_id, properties in items:
+        live_id, was_created = results[imported_id]
+        if was_created:
+            continue
+        store().query_write(
+            update(table).where(table.c.id == live_id).values(**properties)
+        )
+
+
 def _link(table, rows: list[dict[str, Any]]) -> None:
     """Idempotent link-table insert; ``[]`` is a no-op, not an empty INSERT."""
     if not rows:
@@ -976,7 +998,13 @@ def apply_import_model(
 
     with write_transaction():
         live_db_ids = _import_catalog(
-            document, id_map, created, skipped, embed_buffer, column_meta
+            document,
+            id_map,
+            created,
+            skipped,
+            embed_buffer,
+            column_meta,
+            replace=replace,
         )
         if replace:
             _delete_scoped_semantics_not_in_payload(document, live_db_ids)
@@ -1025,6 +1053,8 @@ def _import_catalog(
     skipped: dict[str, int],
     embed_buffer: ImportEmbedBuffer | None,
     column_meta: dict[str, ColumnCatalogMeta],
+    *,
+    replace: bool,
 ) -> list[str]:
     """Import databases, schemas, tables and columns, a level at a time.
 
@@ -1052,6 +1082,13 @@ def _import_catalog(
         live_db_ids.append(live_db_id)
         (created if was_created else skipped)["databases"] += 1
 
+    if replace:
+        _restore_resolved_entity_properties(
+            s.catalog_database,
+            [(db.id, {"name": db_names[db.id] or db.id}) for db in databases],
+            db_results,
+        )
+
     schema_db_names: dict[str, str] = {}
     schema_items: list[tuple[str, dict[str, Any]]] = []
     for db in databases:
@@ -1064,6 +1101,11 @@ def _import_catalog(
     for schema_id, (live_id, was_created) in schema_results.items():
         id_map[schema_id] = live_id
         (created if was_created else skipped)["schemas"] += 1
+
+    if replace:
+        _restore_resolved_entity_properties(
+            s.catalog_schema, schema_items, schema_results
+        )
 
     table_items: list[tuple[str, dict[str, Any]]] = []
     for db in databases:
@@ -1085,6 +1127,9 @@ def _import_catalog(
     for table_id, (live_id, was_created) in table_results.items():
         id_map[table_id] = live_id
         (created if was_created else skipped)["tables"] += 1
+
+    if replace:
+        _restore_resolved_entity_properties(s.catalog_table, table_items, table_results)
 
     column_items: list[tuple[str, dict[str, Any]]] = []
     for db in databases:

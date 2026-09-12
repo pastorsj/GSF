@@ -37,7 +37,9 @@ from typing import Protocol
 from langchain_core.language_models import BaseChatModel
 from gsf.connectors.base import SQLDatabase
 
+from gsf.retrieval.kumo.graph_contract import GraphContractPredictionScope
 from gsf.retrieval.kumo.prompts import build_pql_prompt
+from gsf.retrieval.kumo.provider import is_nonrepairable_provider_error
 from gsf.utils.llm_invoke import invoke_text
 
 logger = logging.getLogger(__name__)
@@ -77,7 +79,7 @@ def _qualify_from_clauses(sql: str, table_names: dict[str, str] | None) -> str:
     if not table_names:
         return sql
 
-    def repl(match: "re.Match[str]") -> str:
+    def repl(match: re.Match[str]) -> str:
         qualified = table_names.get(match.group(2))
         return f"{match.group(1)} {qualified}" if qualified else match.group(0)
 
@@ -330,6 +332,14 @@ class PqlGenerationResult:
 
 class PqlGroupByError(ValueError):
     """A grouped-prediction request that cannot be served (bad group-by column, or wrong target type)."""
+
+
+class PqlEntitySelectionError(ValueError):
+    """The model-authored entity SQL selected no row present in the prediction graph."""
+
+
+class PqlPredictionScopeError(ValueError):
+    """A graph-owned prediction scope was not supplied intact to execution."""
 
 
 def _is_forecast(pql: str) -> bool:
@@ -785,11 +795,115 @@ class _NeighbourhoodMemo:
         self.floor = max(self.floor, index + 1)
 
 
+def _entity_membership_token(value: Any) -> tuple[Any, ...]:
+    """Normalize common dataframe scalars while retaining type-sensitive identity."""
+
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except (TypeError, ValueError):
+            pass
+    try:
+        hash(value)
+    except TypeError as exc:
+        raise PqlPredictionScopeError(
+            "Prediction provider returned an invalid entity identifier."
+        ) from exc
+    return (type(value).__name__, value)
+
+
+def _composite_entity_membership_token(value: tuple[Any, ...]) -> tuple[str, ...]:
+    """Match the pinned SDK's decoded composite-key rendering contract."""
+
+    rendered: list[str] = []
+    for part in value:
+        if hasattr(part, "item"):
+            try:
+                part = part.item()
+            except (TypeError, ValueError):
+                pass
+        rendered.append(
+            "true" if part is True else "false" if part is False else str(part)
+        )
+    return tuple(rendered)
+
+
+def _enforce_prediction_entity_boundary(
+    prediction: Any,
+    requested_indices: list[Any] | None,
+    *,
+    pql: str,
+) -> None:
+    """Reject provider rows whose entity key was not present in the exact request batch.
+
+    Forecast and link-prediction results legitimately repeat an entity across
+    timeframes or ranked classes, so this enforces membership rather than row
+    count or uniqueness. Composite identities are decoded by the SDK into the
+    leading key columns and compared as tuples.
+    """
+
+    if requested_indices is None:
+        return
+    if not requested_indices:
+        raise PqlPredictionScopeError(
+            "Prediction execution received an empty explicit entity scope."
+        )
+
+    import pandas as pd
+
+    if not isinstance(prediction, pd.DataFrame):
+        raise PqlPredictionScopeError(
+            "Prediction provider returned an invalid result shape."
+        )
+    lowered = {str(column).casefold(): column for column in prediction.columns}
+    tuple_widths = {
+        len(value) for value in requested_indices if isinstance(value, tuple)
+    }
+    if tuple_widths:
+        if len(tuple_widths) != 1 or not all(
+            isinstance(value, tuple) for value in requested_indices
+        ):
+            raise PqlPredictionScopeError(
+                "Prediction request contains inconsistent composite entity identifiers."
+            )
+        width = next(iter(tuple_widths))
+        if width < 2 or len(prediction.columns) < width:
+            raise PqlPredictionScopeError(
+                "Prediction provider omitted the requested composite entity identity."
+            )
+        returned = list(prediction.iloc[:, :width].itertuples(index=False, name=None))
+        allowed_composites = {
+            _composite_entity_membership_token(value) for value in requested_indices
+        }
+        if any(
+            _composite_entity_membership_token(value) not in allowed_composites
+            for value in returned
+        ):
+            raise PqlPredictionScopeError(
+                "Prediction provider returned an entity outside the requested graph-backed scope."
+            )
+    else:
+        entity_column = lowered.get("entity")
+        parsed_entity = parse_entity(pql)
+        if entity_column is None and parsed_entity is not None:
+            entity_column = lowered.get(parsed_entity[1].casefold())
+        if entity_column is None:
+            raise PqlPredictionScopeError(
+                "Prediction provider omitted the requested entity identity."
+            )
+        returned = prediction[entity_column].tolist()
+        allowed = {_entity_membership_token(value) for value in requested_indices}
+        if any(_entity_membership_token(value) not in allowed for value in returned):
+            raise PqlPredictionScopeError(
+                "Prediction provider returned an entity outside the requested graph-backed scope."
+            )
+
+
 def _predict_resilient(
     predict_fn: Callable[[list[int] | None], Any],
     *,
     device_assert_terminal: bool = True,
-    memo: "_NeighbourhoodMemo | None" = None,
+    memo: _NeighbourhoodMemo | None = None,
 ) -> Any:
     """Run ``predict_fn(num_neighbors)`` accuracy-first.
 
@@ -865,8 +979,9 @@ def _predict_in_batches(
     indices: list[Any] | None,
     predict_call: Callable[[list[Any] | None, list[int] | None], Any],
     *,
+    pql: str,
     device_assert_terminal: bool = True,
-    memo: "_NeighbourhoodMemo | None" = None,
+    memo: _NeighbourhoodMemo | None = None,
 ) -> Any:
     """Run the resilient predict over ``indices`` in ordered chunks of at most ``_PREDICT_BATCH_SIZE``.
 
@@ -878,23 +993,25 @@ def _predict_in_batches(
     is equivalent to scoring the whole scope at once.
     """
     if not indices or len(indices) <= _PREDICT_BATCH_SIZE:
-        return _predict_resilient(
+        result = _predict_resilient(
             lambda nn: predict_call(indices, nn),
             device_assert_terminal=device_assert_terminal,
             memo=memo,
         )
+        _enforce_prediction_entity_boundary(result, indices, pql=pql)
+        return result
     import pandas as pd
 
     frames = []
     for start in range(0, len(indices), _PREDICT_BATCH_SIZE):
         chunk = indices[start : start + _PREDICT_BATCH_SIZE]
-        frames.append(
-            _predict_resilient(
-                lambda nn, c=chunk: predict_call(c, nn),
-                device_assert_terminal=device_assert_terminal,
-                memo=memo,
-            )
+        result = _predict_resilient(
+            lambda nn, c=chunk: predict_call(c, nn),
+            device_assert_terminal=device_assert_terminal,
+            memo=memo,
         )
+        _enforce_prediction_entity_boundary(result, chunk, pql=pql)
+        frames.append(result)
     return pd.concat(frames, ignore_index=True)
 
 
@@ -1138,9 +1255,16 @@ def _resolve_indices(
     if entity_sql:
         df = connector.execute(_qualify_from_clauses(entity_sql, table_names))
         ids = df.iloc[:, 0].dropna().tolist() if not df.empty else []
+        ids = list(dict.fromkeys(ids))
         if available is not None:
             allowed = set(available)
             ids = [value for value in ids if value in allowed]
+        if not ids:
+            raise PqlEntitySelectionError(
+                "The entity-selection SQL matched zero graph-backed rows. Regenerate the entity-selection SQL "
+                "while preserving the requested population, using the exact table and column names and exact "
+                "categorical literals shown in the Columns section. Do not remove the requested scope."
+            )
     elif available is not None:
         ids = available
     else:
@@ -1199,6 +1323,11 @@ _ANCHOR_WINDOW_RE = re.compile(
     r",\s*\d+\s*,\s*(\d+)\s*,\s*(day|days|week|weeks|month|months|year|years)\s*\)",
     re.IGNORECASE,
 )
+_TEMPORAL_WINDOW_RE = re.compile(
+    r",\s*\d+\s*,\s*\d+\s*,\s*"
+    r"(?:second|seconds|minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s*\)",
+    re.IGNORECASE,
+)
 _ANCHOR_UNIT_DAYS = {
     "day": 1,
     "days": 1,
@@ -1243,8 +1372,7 @@ def _forecast_anchor(
         import pandas as pd
 
         df = connector.execute(
-            f"SELECT MAX({quote_ident(time_col)}) AS m "
-            f"FROM {_sql_table(anchor_table, table_names)}"
+            f"SELECT MAX({quote_ident(time_col)}) AS m FROM {_sql_table(anchor_table, table_names)}"
         )
         data_max = (
             pd.Timestamp(df.iloc[0, 0])
@@ -1253,7 +1381,7 @@ def _forecast_anchor(
         )
     except Exception:  # noqa: BLE001 - anchor is best-effort; fall back to the SDK default
         return None
-    if data_max is None:
+    if data_max is None or pd.isna(data_max):
         return None
     safe = data_max - pd.Timedelta(days=horizon_days + 7)
     now_ts = (
@@ -1261,7 +1389,196 @@ def _forecast_anchor(
         if now is not None
         else pd.Timestamp(pd.Timestamp.today().date())
     )
+    # Database connectors legitimately return both timezone-naive timestamps
+    # (for SQL TIMESTAMP) and timezone-aware timestamps (for TIMESTAMPTZ).  The
+    # anchor must use the same convention as the graph's governed time column;
+    # otherwise even choosing ``min(now, safe)`` raises before Kumo receives the
+    # request.  Preserve wall-clock semantics for a naive database and preserve
+    # (or convert to) the source timezone for an aware database.
+    if data_max.tz is None:
+        if now_ts.tz is not None:
+            now_ts = now_ts.tz_localize(None)
+    elif now_ts.tz is None:
+        now_ts = now_ts.tz_localize(data_max.tz)
+    else:
+        now_ts = now_ts.tz_convert(data_max.tz)
     return min(now_ts, safe)
+
+
+def _matching_population_scope(
+    pql: str,
+    prediction_scope: GraphContractPredictionScope | None,
+) -> GraphContractPredictionScope | None:
+    if prediction_scope is None:
+        return None
+    entity = parse_entity(pql)
+    if entity is None:
+        return None
+    table, column = entity
+    if (
+        table.casefold() != prediction_scope.entity_table.casefold()
+        or column.casefold() != prediction_scope.entity_column.casefold()
+    ):
+        return None
+    return prediction_scope
+
+
+def _effective_forecast_anchor(
+    pql: str,
+    connector: SQLDatabase,
+    time_columns: dict[str, str | None] | None,
+    *,
+    table_names: dict[str, str] | None,
+    prediction_scope: GraphContractPredictionScope | None,
+) -> Any:
+    # The anchor is the governed temporal boundary for the whole graph.  Its
+    # population is narrower: that default applies only when FOR EACH names the
+    # contracted entity table/key (see ``_effective_entity_ids`` below).
+    if (
+        prediction_scope is not None
+        and _ANCHOR_TABLE_RE.search(pql or "")
+        and _TEMPORAL_WINDOW_RE.search(pql or "")
+    ):
+        import pandas as pd
+
+        return pd.Timestamp(prediction_scope.anchor_time)
+    return _forecast_anchor(pql, connector, time_columns, table_names=table_names)
+
+
+def _effective_entity_ids(
+    pql: str,
+    available_entity_ids: dict[str, list[Any]] | None,
+    prediction_scope: GraphContractPredictionScope | None,
+    prediction_scope_ids: tuple[Any, ...],
+) -> dict[str, list[Any]] | None:
+    scope = _matching_population_scope(pql, prediction_scope)
+    if scope is None:
+        return available_entity_ids
+    scoped = dict(available_entity_ids or {})
+    scoped[scope.entity_table.casefold()] = list(prediction_scope_ids)
+    return scoped
+
+
+def _validate_prediction_scope_ids(
+    prediction_scope: GraphContractPredictionScope | None,
+    prediction_scope_ids: tuple[Any, ...],
+    available_entity_ids: dict[str, list[Any]] | None,
+) -> tuple[Any, ...]:
+    """Validate the public handoff from the graph loader before any provider call.
+
+    ``_resolve_prediction_scope`` validates the source view while preparing the
+    graph. These consistency checks keep the lower-level public PQL APIs bounded
+    when either half of that prepared context is missing or malformed; they are
+    not an authenticity proof for same-count substitutions within the graph.
+    """
+    if prediction_scope is None:
+        return prediction_scope_ids
+    if not isinstance(prediction_scope_ids, tuple) or not prediction_scope_ids:
+        raise PqlPredictionScopeError(
+            "Prediction-scope entity identifiers are missing or empty."
+        )
+    if len(prediction_scope_ids) != prediction_scope.population_rows:
+        raise PqlPredictionScopeError(
+            "Prediction-scope entity count does not match the graph contract."
+        )
+
+    try:
+        import pandas as pd
+
+        if any(bool(pd.isna(value)) for value in prediction_scope_ids):
+            raise PqlPredictionScopeError(
+                "Prediction-scope entity identifiers contain a missing value."
+            )
+        scope_set = set(prediction_scope_ids)
+    except PqlPredictionScopeError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise PqlPredictionScopeError(
+            "Prediction-scope entity identifiers are not valid scalar keys."
+        ) from exc
+    if len(scope_set) != len(prediction_scope_ids):
+        raise PqlPredictionScopeError(
+            "Prediction-scope entity identifiers contain duplicates."
+        )
+
+    if available_entity_ids is None:
+        raise PqlPredictionScopeError(
+            "Prediction scope requires loaded graph entity identifiers."
+        )
+    matches = [
+        values
+        for table, values in available_entity_ids.items()
+        if table.casefold() == prediction_scope.entity_table.casefold()
+    ]
+    if len(matches) != 1 or not matches[0]:
+        raise PqlPredictionScopeError(
+            "Prediction-scope entity table is missing or empty in the loaded graph."
+        )
+    try:
+        available_set = set(matches[0])
+    except TypeError as exc:
+        raise PqlPredictionScopeError(
+            "Loaded graph entity identifiers are not valid scalar keys."
+        ) from exc
+    if len(available_set) != len(matches[0]):
+        raise PqlPredictionScopeError(
+            "Loaded graph entity identifiers contain duplicates."
+        )
+    if not scope_set <= available_set:
+        raise PqlPredictionScopeError(
+            "Prediction-scope entity identifiers include a value outside the loaded graph."
+        )
+    return prediction_scope_ids
+
+
+def _require_scoped_prediction_indices(
+    indices: list[Any],
+    prediction_scope: GraphContractPredictionScope | None,
+) -> None:
+    if prediction_scope is not None and not indices:
+        raise PqlPredictionScopeError(
+            "Scoped prediction resolved no graph-backed entity identifiers."
+        )
+
+
+def _require_scoped_graph_entity_ids(
+    pql: str,
+    prediction_scope: GraphContractPredictionScope | None,
+    available_entity_ids: dict[str, list[Any]] | None,
+) -> None:
+    """Forbid a scoped run from falling back to source rows outside its loaded graph."""
+    if prediction_scope is None:
+        return
+    entity = parse_entity(pql)
+    if entity is None or available_entity_ids is None:
+        raise PqlPredictionScopeError(
+            "Scoped prediction does not identify an entity inventory loaded into the graph."
+        )
+    matches = [
+        values
+        for table, values in available_entity_ids.items()
+        if table.casefold() == entity[0].casefold()
+    ]
+    if len(matches) != 1 or not matches[0]:
+        raise PqlPredictionScopeError(
+            "Scoped prediction entity inventory is missing or empty in the loaded graph."
+        )
+
+
+def _effective_entity_cap(
+    pql: str,
+    requested_cap: int,
+    prediction_scope: GraphContractPredictionScope | None,
+) -> int:
+    scope = _matching_population_scope(pql, prediction_scope)
+    if scope is None:
+        return requested_cap
+    if scope.population_rows > _GROUP_BY_MAX_ENTITIES:
+        raise PqlPredictionScopeError(
+            f"Prediction scope contains {scope.population_rows} entities, above the "
+            f"{_GROUP_BY_MAX_ENTITIES}-entity graph execution limit."
+        )
+    return max(requested_cap, scope.population_rows)
 
 
 def _resolve_single_index(
@@ -1368,6 +1685,9 @@ def predict_all(
     max_entities: int = 2000,
     time_columns: dict[str, str | None] | None = None,
     table_names: dict[str, str] | None = None,
+    available_entity_ids: dict[str, list[Any]] | None = None,
+    prediction_scope: GraphContractPredictionScope | None = None,
+    prediction_scope_ids: tuple[Any, ...] = (),
 ) -> Any:
     """Run a pre-built, known-good PQL over the full entity scope and return the COMPLETE prediction frame.
 
@@ -1376,9 +1696,36 @@ def predict_all(
     baseline) need all rows. Resolves the entity scope (explicit ``entity_sql`` or the PQL's own WHERE) and
     runs the same accuracy-first resilient predict path as :func:`generate_pql`.
     """
+    prediction_scope_ids = _validate_prediction_scope_ids(
+        prediction_scope,
+        prediction_scope_ids,
+        available_entity_ids,
+    )
     scope = entity_sql if entity_sql is not None else extract_entity_sql(pql)
-    indices = _resolve_indices(pql, scope, connector, max_entities, table_names)
-    anchor = _forecast_anchor(pql, connector, time_columns, table_names=table_names)
+    _require_scoped_graph_entity_ids(pql, prediction_scope, available_entity_ids)
+    effective_entity_ids = _effective_entity_ids(
+        pql,
+        available_entity_ids,
+        prediction_scope,
+        prediction_scope_ids,
+    )
+    entity_cap = _effective_entity_cap(pql, max_entities, prediction_scope)
+    indices = _resolve_indices(
+        pql,
+        scope,
+        connector,
+        entity_cap,
+        table_names,
+        effective_entity_ids,
+    )
+    _require_scoped_prediction_indices(indices, prediction_scope)
+    anchor = _effective_forecast_anchor(
+        pql,
+        connector,
+        time_columns,
+        table_names=table_names,
+        prediction_scope=prediction_scope,
+    )
 
     def _predict_call(idx: list[Any] | None, num_neighbors: list[int] | None) -> Any:
         kw: dict[str, Any] = {}
@@ -1386,10 +1733,14 @@ def predict_all(
             kw["num_neighbors"] = num_neighbors
         if anchor is not None:
             kw["anchor_time"] = anchor
-        return kumo_model.predict(pql, indices=idx or None, **kw)
+        provider_indices = idx if prediction_scope is not None else (idx or None)
+        return kumo_model.predict(pql, indices=provider_indices, **kw)
 
     raw = _predict_in_batches(
-        indices, _predict_call, device_assert_terminal=_is_existence_count_pql(pql)
+        indices,
+        _predict_call,
+        pql=pql,
+        device_assert_terminal=_is_existence_count_pql(pql),
     )
     return _rank_prediction(raw)
 
@@ -1421,6 +1772,8 @@ def generate_pql(
     time_columns: dict[str, str | None] | None = None,
     table_names: dict[str, str] | None = None,
     available_entity_ids: dict[str, list[Any]] | None = None,
+    prediction_scope: GraphContractPredictionScope | None = None,
+    prediction_scope_ids: tuple[Any, ...] = (),
     examples: list[dict[str, str]] | None = None,
 ) -> PqlGenerationResult:
     """Generate a PQL, validate it cheaply against the graph, scope entities, and predict (with repair).
@@ -1430,7 +1783,16 @@ def generate_pql(
 
     ``examples`` are verified ``{question, query}`` PQL few-shots (retrieved from the
     ``PqlAnalysis`` corpus); they populate the prompt's "Verified examples" section.
+
+    When ``group_by`` is requested, any entity-selection SQL remains authoritative:
+    it is intersected with the graph-owned population before the scored rows are
+    aggregated.
     """
+    prediction_scope_ids = _validate_prediction_scope_ids(
+        prediction_scope,
+        prediction_scope_ids,
+        available_entity_ids,
+    )
     examples = examples or []
     docs: list[str] = []
 
@@ -1480,10 +1842,7 @@ def generate_pql(
             continue
         pql = extract_pql(raw)
         if not pql:
-            prev_error = (
-                "The response did not contain a PQL statement beginning with "
-                "PREDICT on its own line."
-            )
+            prev_error = "The response did not contain a PQL statement beginning with PREDICT on its own line."
             result.error = prev_error
             logger.info(
                 "PQL attempt %d/%d failed: %s",
@@ -1500,6 +1859,13 @@ def generate_pql(
             schema_text="\n".join([graph_ddl, column_reference, *docs]),
         )
         pql = _strip_unasked_generic_entity_filter(pql, question)
+        _require_scoped_graph_entity_ids(pql, prediction_scope, available_entity_ids)
+        effective_entity_ids = _effective_entity_ids(
+            pql,
+            available_entity_ids,
+            prediction_scope,
+            prediction_scope_ids,
+        )
         entity_sql = extract_entity_sql(raw)
         if explain and explain_entity:
             pql = _scope_explain_entity(pql, explain_entity)
@@ -1519,15 +1885,19 @@ def generate_pql(
                     explain_entity,
                     connector,
                     table_names,
-                    available_entity_ids,
+                    effective_entity_ids,
                 )
                 if not indices:
                     raise ValueError(
                         f"Entity '{explain_entity}' not found in the dataset for this query."
                     )
 
-                _anchor = _forecast_anchor(
-                    pql, connector, time_columns, table_names=table_names
+                _anchor = _effective_forecast_anchor(
+                    pql,
+                    connector,
+                    time_columns,
+                    table_names=table_names,
+                    prediction_scope=prediction_scope,
                 )
 
                 def _explain_call(num_neighbors: list[int] | None) -> Any:
@@ -1544,24 +1914,28 @@ def generate_pql(
                 result.explanation_warning = getattr(expl, "warning", None)
                 result.explanation_details = getattr(expl, "details", None)
                 prediction = getattr(expl, "prediction", None)
-                if prediction is not None and hasattr(prediction, "columns"):
-                    if _anchor is not None and not any(
-                        str(column).casefold() == "anchor_timestamp"
-                        for column in prediction.columns
-                    ):
-                        prediction = prediction.copy()
-                        prediction["ANCHOR_TIMESTAMP"] = _anchor
-                    result.columns = list(prediction.columns)
-                    result.rows = prediction.head(max_preview_rows).to_dict("records")
-                    if persist_table and mirror_path and persist_lock is not None:
-                        _persist_full_prediction(
-                            prediction,
-                            pql=pql,
-                            mirror_path=mirror_path,
-                            table=persist_table,
-                            lock=persist_lock,
-                            result=result,
-                        )
+                _enforce_prediction_entity_boundary(prediction, indices, pql=pql)
+                if prediction.empty:
+                    raise PqlPredictionScopeError(
+                        "Prediction provider returned no entity-correlated explanation rows."
+                    )
+                if _anchor is not None and not any(
+                    str(column).casefold() == "anchor_timestamp"
+                    for column in prediction.columns
+                ):
+                    prediction = prediction.copy()
+                    prediction["ANCHOR_TIMESTAMP"] = _anchor
+                result.columns = list(prediction.columns)
+                result.rows = prediction.head(max_preview_rows).to_dict("records")
+                if persist_table and mirror_path and persist_lock is not None:
+                    _persist_full_prediction(
+                        prediction,
+                        pql=pql,
+                        mirror_path=mirror_path,
+                        table=persist_table,
+                        lock=persist_lock,
+                        result=result,
+                    )
             else:
                 forecast = _is_forecast(pql)
                 whole_population = group_by or bool(persist_table)
@@ -1570,24 +1944,16 @@ def generate_pql(
                     if whole_population
                     else max_entities
                 )
-                scope_sql = entity_sql
-                if group_by and entity_sql:
-                    scope_sql = None
-                    if re.search(r"\b(WHERE|LIMIT)\b", entity_sql, re.IGNORECASE):
-                        result.note = (
-                            "A grouped breakdown scores every entity and aggregates by "
-                            f"'{group_by}', so the planner's entity filter was not applied — these totals "
-                            "cover the whole population. Ask without grouping to filter a sub-population."
-                        )
-                    result.entity_sql = None
+                entity_cap = _effective_entity_cap(pql, entity_cap, prediction_scope)
                 indices = _resolve_indices(
                     pql,
-                    scope_sql,
+                    entity_sql,
                     connector,
                     entity_cap,
                     table_names,
-                    available_entity_ids,
+                    effective_entity_ids,
                 )
+                _require_scoped_prediction_indices(indices, prediction_scope)
                 if forecast:
                     if len(indices) > 1:
                         parsed = parse_entity(pql)
@@ -1605,8 +1971,12 @@ def generate_pql(
                         )
                     indices = indices[:1]
 
-                _anchor = _forecast_anchor(
-                    pql, connector, time_columns, table_names=table_names
+                _anchor = _effective_forecast_anchor(
+                    pql,
+                    connector,
+                    time_columns,
+                    table_names=table_names,
+                    prediction_scope=prediction_scope,
                 )
 
                 def _predict_call(
@@ -1617,11 +1987,15 @@ def generate_pql(
                         kw["num_neighbors"] = num_neighbors
                     if _anchor is not None:
                         kw["anchor_time"] = _anchor
-                    return kumo_model.predict(pql, indices=idx or None, **kw)
+                    provider_indices = (
+                        idx if prediction_scope is not None else (idx or None)
+                    )
+                    return kumo_model.predict(pql, indices=provider_indices, **kw)
 
                 raw = _predict_in_batches(
                     indices,
                     _predict_call,
+                    pql=pql,
                     device_assert_terminal=_is_existence_count_pql(pql),
                     memo=neighbourhood_memo,
                 )
@@ -1681,12 +2055,26 @@ def generate_pql(
             result.error = str(exc)
             logger.info("Grouped-prediction request rejected: %s", str(exc)[:160])
             break
+        except PqlPredictionScopeError as exc:
+            result.error = str(exc)
+            logger.warning("Prediction-scope execution rejected: %s", str(exc)[:160])
+            break
         except Exception as exc:  # noqa: BLE001 - error feeds the repair loop
             prev_pql, prev_error = pql, str(exc)
             result.error = prev_error
             logger.info(
                 "PQL attempt %d/%d failed: %s", attempt, max_tries, prev_error[:160]
             )
+            if is_nonrepairable_provider_error(exc):
+                result.error = (
+                    "No prediction was produced because the configured prediction provider could not execute "
+                    "a non-repairable provider or request contract. Any historical structured analysis returned "
+                    "by another work item is not a forecast."
+                )
+                logger.warning(
+                    "Non-repairable Kumo provider/request contract failure; not regenerating PQL."
+                )
+                break
             if _is_unsupported_shape_error(prev_error):
                 if _is_existence_count_pql(pql):
                     result.error = _friendly_unsupported_message(pql, prev_error)

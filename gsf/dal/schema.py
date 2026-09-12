@@ -607,12 +607,14 @@ custom_analysis__sql = Table(
     ),
 )
 
-# Never attached to a database, which is why a *scoped* semantic reset does not
-# reach these -- see `reset.delete_semantic_layer`.
 pql_analysis = Table(
     "pql_analysis",
     METADATA,
     _id(),
+    # Predictive few-shots must stay inside the graph/database they were
+    # reviewed against. Legacy rows are nullable until they are re-imported;
+    # scoped retrieval deliberately ignores those unowned examples.
+    Column("database_name", Text, nullable=True, index=True),
     Column("name", Text, nullable=False),
     Column("description", Text, nullable=True),
     Column("pql", Text, nullable=True),

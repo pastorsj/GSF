@@ -250,13 +250,58 @@ def test_import_catalog_encodes_supplied_sample_values(
         sql_column_resolver=lambda _sql, _db: [],
     )
 
-    _import_catalog(document, {}, defaultdict(int), defaultdict(int), None, {})
+    _import_catalog(
+        document,
+        {},
+        defaultdict(int),
+        defaultdict(int),
+        None,
+        {},
+        replace=False,
+    )
 
     column_calls = [
         call for call in mock_resolve.call_args_list if call[0][0] is s.catalog_column
     ]
     props = column_calls[0][0][1][0][1]
     assert props["sample_values"] == expected
+
+
+@patch("gsf.dal.model_interchange.store")
+def test_replace_restores_properties_on_resolved_catalog_rows(
+    mock_store: MagicMock,
+) -> None:
+    """A stable imported id preserves identity, not stale local metadata."""
+    from gsf.dal import schema as s
+    from gsf.dal.model_interchange import _restore_resolved_entity_properties
+
+    _restore_resolved_entity_properties(
+        s.catalog_table,
+        [
+            (
+                "yaml-table",
+                {
+                    "name": "deployments",
+                    "description": "reviewed",
+                    "pk": ["deployment_id"],
+                    "table_type": "view",
+                    "schema_id": "successor-schema",
+                },
+            ),
+            ("new-table", {"name": "new"}),
+        ],
+        {
+            "yaml-table": ("live-table", False),
+            "new-table": ("live-new-table", True),
+        },
+    )
+
+    mock_store.return_value.query_write.assert_called_once()
+    statement = mock_store.return_value.query_write.call_args.args[0]
+    params = statement.compile().params
+    assert params["id_1"] == "live-table"
+    assert params["name"] == "deployments"
+    assert params["schema_id"] == "successor-schema"
 
 
 def _in_scope_export_rows() -> dict:

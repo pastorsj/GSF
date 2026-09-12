@@ -385,7 +385,7 @@ def seed_pql_analyses() -> None:
     from gsf.dal.pql_analyses import upsert_pql_analysis_node
 
     for analysis_id, name, description, pql in PQL_ANALYSES:
-        upsert_pql_analysis_node(analysis_id, name, description, pql)
+        upsert_pql_analysis_node(analysis_id, "pagila", name, description, pql)
 
 
 def seed_zones() -> list[dict[str, Any]]:

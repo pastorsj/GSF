@@ -13,7 +13,7 @@ detection.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from gsf.connectors.base import SQLDatabase
 
@@ -47,8 +47,7 @@ def resolve_target_database_name(
 
     available = ", ".join(sorted(database_names)) or "(none)"
     raise ValueError(
-        f"target_db {target_db!r} does not match a configured database name. "
-        f"Available databases: {available}."
+        f"target_db {target_db!r} does not match a configured database name. Available databases: {available}."
     )
 
 
@@ -92,6 +91,10 @@ def resolve_connector_from_tables(
         )
 
     if table_database_names:
+        if len(table_database_names) != 1:
+            raise ValueError(
+                "Relevant tables span multiple databases; federated SQL execution is not supported."
+            )
         database_name = next(iter(table_database_names))
         connector = db_to_connector.get(database_name)
         if connector is None:

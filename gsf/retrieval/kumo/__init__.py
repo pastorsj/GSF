@@ -4,13 +4,13 @@
 
 """KumoRFM-backed prediction for the text-to-SQL agent."""
 
-from gsf.retrieval.kumo.predictor import (
-    PredictionContext,
-    build_prediction_context,
-    run_prediction,
-)
+from gsf.retrieval.kumo.graph_contract import GraphContractPredictionScope
+from gsf.retrieval.kumo.predictor import PredictionContext
+from gsf.retrieval.kumo.predictor import build_prediction_context
+from gsf.retrieval.kumo.predictor import run_prediction
 
 __all__ = [
+    "GraphContractPredictionScope",
     "PredictionContext",
     "build_prediction_context",
     "run_prediction",

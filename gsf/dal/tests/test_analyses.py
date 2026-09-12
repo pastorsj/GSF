@@ -238,7 +238,7 @@ def test_tables_from_analyses_nests_columns(world) -> None:
 def test_empty_id_lists_short_circuit() -> None:
     assert ca.fetch_custom_analyses_with_sql([]) == []
     assert ca.fetch_tables_from_custom_analyses([]) == []
-    assert pa.fetch_pql_analyses_by_ids([]) == {}
+    assert pa.fetch_pql_analyses_by_ids([], database_name="unused") == {}
 
 
 # --------------------------------------------------------------------------
@@ -326,21 +326,32 @@ def test_a_blank_analysis_description_is_omitted(world) -> None:
 @pytest.fixture
 def pql(world):
     pa.upsert_pql_analysis_node(
-        str(uuid.uuid4()), f"{world.prefix}-churn", "who will churn", "PREDICT x"
+        str(uuid.uuid4()),
+        world.prefix,
+        f"{world.prefix}-churn",
+        "who will churn",
+        "PREDICT x",
     )
-    world.pql_id = pa.find_pql_analysis_by_name(f"{world.prefix}-churn", None)["id"]
+    row = pa.find_pql_analysis_by_name(f"{world.prefix}-churn", None, world.prefix)
+    assert row is not None
+    world.pql_id = row["id"]
     return world
 
 
 def test_pql_upsert_is_by_id_and_overwrites(pql) -> None:
     """A PUT: every field is assigned, because the conflict checks already ran."""
     pa.upsert_pql_analysis_node(
-        pql.pql_id, f"{pql.prefix}-churn", "revised", "PREDICT y"
+        pql.pql_id,
+        pql.prefix,
+        f"{pql.prefix}-churn",
+        "revised",
+        "PREDICT y",
     )
     rows = [r for r in pa.list_pql_analyses() if r["name"].startswith(pql.prefix)]
     assert rows == [
         {
             "id": pql.pql_id,
+            "database_name": pql.prefix,
             "name": f"{pql.prefix}-churn",
             "description": "revised",
             "pql": "PREDICT y",
@@ -349,15 +360,28 @@ def test_pql_upsert_is_by_id_and_overwrites(pql) -> None:
 
 
 def test_pql_conflict_lookups_exclude_the_row_being_edited(pql) -> None:
-    assert pa.find_pql_analysis_by_name(f"{pql.prefix}-churn", pql.pql_id) is None
-    assert pa.find_pql_analysis_by_pql("PREDICT x", pql.pql_id) is None
-    assert pa.find_pql_analysis_by_pql("PREDICT x", None)["id"] == pql.pql_id
+    assert (
+        pa.find_pql_analysis_by_name(f"{pql.prefix}-churn", pql.pql_id, pql.prefix)
+        is None
+    )
+    assert pa.find_pql_analysis_by_pql("PREDICT y", pql.pql_id, pql.prefix) is None
+    assert (
+        pa.find_pql_analysis_by_pql("PREDICT y", None, pql.prefix)["id"] == pql.pql_id
+    )
 
 
 def test_pql_fetch_by_ids_strips_and_defaults(pql) -> None:
     """These go into a prompt, where None would render as the word "None"."""
-    pa.upsert_pql_analysis_node(pql.pql_id, f"{pql.prefix}-churn", "  ", " PREDICT x ")
-    row = pa.fetch_pql_analyses_by_ids([pql.pql_id])[pql.pql_id]
+    pa.upsert_pql_analysis_node(
+        pql.pql_id,
+        pql.prefix,
+        f"{pql.prefix}-churn",
+        "  ",
+        " PREDICT x ",
+    )
+    row = pa.fetch_pql_analyses_by_ids([pql.pql_id], database_name=pql.prefix)[
+        pql.pql_id
+    ]
     assert row["description"] == ""
     assert row["pql"] == "PREDICT x"
 
@@ -379,13 +403,20 @@ def test_pql_docs_embed_the_question_not_the_pql(pql) -> None:
             "text": f"{pql.prefix}-churn: who will churn",
             "name": f"{pql.prefix}-churn",
             "id": pql.pql_id,
+            "database_name": pql.prefix,
         }
     ]
     assert "PREDICT" not in docs[0]["text"]
 
 
 def test_a_blank_pql_description_is_omitted(pql) -> None:
-    pa.upsert_pql_analysis_node(pql.pql_id, f"{pql.prefix}-churn", "  ", "PREDICT x")
+    pa.upsert_pql_analysis_node(
+        pql.pql_id,
+        pql.prefix,
+        f"{pql.prefix}-churn",
+        "  ",
+        "PREDICT x",
+    )
     assert pa._pql_analysis_docs(pql.pql_id)[0]["text"] == f"{pql.prefix}-churn"
 
 

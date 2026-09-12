@@ -14,9 +14,8 @@ otherwise be discovered by a user:
 * **Deletes never cross a database.** Foreign keys point downward within one
   database, so a reset cannot reach another's data -- including through a Term
   the two share.
-* **A scoped reset misses ``PqlAnalysis``.** Nothing connects one to a
-  database, so there is no scope to match it by -- and a scoped reset silently
-  wiping every predictive analysis in the deployment would be worse.
+* **A scoped reset removes only owned ``PqlAnalysis`` rows.** Predictive
+  examples carry the database whose graph they were reviewed against.
 
 The pgvector side is stubbed. These tests are about which rows the store keeps,
 and a real embedding round trip would only add a way for them to fail for an
@@ -296,23 +295,30 @@ def test_a_column_attribute_goes_with_its_table(world) -> None:
 
 
 # --------------------------------------------------------------------------
-# the scoped gap, preserved
+# predictive-example scope
 # --------------------------------------------------------------------------
 
 
-def test_a_scoped_reset_does_not_touch_pql_analyses(world) -> None:
-    """B2. Preserved deliberately, and asserted so it cannot change by accident.
-
-    A PqlAnalysis is never attached to a database, so no scope selects it. Deleting every predictive analysis in the deployment during a
-    *scoped* reset would be a worse surprise than leaving them.
-    """
+def test_a_scoped_reset_removes_only_owned_pql_analyses(world) -> None:
     prefix, make = world
     shop = make("shop")
-    analysis = _add(s.pql_analysis, name=f"{prefix}-churn", pql="PREDICT x")
+    owned = _add(
+        s.pql_analysis,
+        database_name=shop.name,
+        name=f"{prefix}-shop-churn",
+        pql="PREDICT x",
+    )
+    other = _add(
+        s.pql_analysis,
+        database_name=f"{prefix}-warehouse",
+        name=f"{prefix}-warehouse-churn",
+        pql="PREDICT y",
+    )
 
     r.delete_semantic_layer(shop.name)
 
-    assert _exists(s.pql_analysis, analysis)
+    assert not _exists(s.pql_analysis, owned)
+    assert _exists(s.pql_analysis, other)
 
 
 def test_an_unscoped_reset_does_remove_them(world) -> None:
@@ -404,3 +410,40 @@ def test_resetting_a_database_that_does_not_exist_is_harmless(world) -> None:
     r.delete_all_data(f"{shop.prefix}-no-such-database")
 
     assert _exists(s.catalog_database, shop.id)
+
+
+def test_retire_database_alias_keeps_reparented_catalog(world, stub_vdbs) -> None:
+    _, make = world
+    legacy = make("legacy")
+    successor = make("successor")
+    store().query_write(
+        s.catalog_schema.delete().where(s.catalog_schema.c.id == successor.schema)
+    )
+    store().query_write(
+        s.catalog_schema.update()
+        .where(s.catalog_schema.c.id == legacy.schema)
+        .values(database_id=successor.id)
+    )
+
+    result = r.retire_database_alias(
+        legacy.name, successor_database_name=successor.name
+    )
+
+    assert not _exists(s.catalog_database, legacy.id)
+    assert _exists(s.catalog_database, successor.id)
+    assert _exists(s.catalog_schema, legacy.schema)
+    assert _exists(s.catalog_table, legacy.table)
+    assert result.catalog_nodes == 1
+    assert stub_vdbs["data"].deleted_databases == [legacy.name]
+    assert stub_vdbs["semantic"].deleted_databases == [legacy.name]
+
+
+def test_retire_database_alias_rejects_unmigrated_schema(world) -> None:
+    _, make = world
+    legacy = make("legacy")
+    successor = make("successor")
+
+    with pytest.raises(RuntimeError, match="have not migrated"):
+        r.retire_database_alias(legacy.name, successor_database_name=successor.name)
+
+    assert _exists(s.catalog_database, legacy.id)

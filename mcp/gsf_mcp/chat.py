@@ -168,6 +168,7 @@ def register(mcp: FastMCP, settings: Settings, client: httpx.AsyncClient) -> Non
         ctx: Context,
         conversation_id: str | None = None,
         evidence: str | None = None,
+        prediction: bool = False,
     ) -> DataAnswer:
         """Run one text-to-SQL turn and return its structured result.
 
@@ -184,12 +185,16 @@ def register(mcp: FastMCP, settings: Settings, client: httpx.AsyncClient) -> Non
                 question while the first is still running.
             evidence: Optional authoritative evidence supplied separately
                 from the question.
+            prediction: Force the Kumo prediction path. Leave false for GSF
+                to choose between SQL and prediction from the question.
         """
         body: dict[str, Any] = {"question": question}
         if conversation_id:
             body["conversation_id"] = conversation_id
         if evidence:
             body["evidence"] = evidence
+        if prediction:
+            body["prediction"] = True
 
         answer: DataAnswer | None = None
         steps = 0

@@ -320,6 +320,22 @@ def test_forwards_evidence_separately_from_question() -> None:
     }
 
 
+def test_forwards_explicit_prediction_without_changing_the_default() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_sse({"type": "result", "answer": _ANSWER}).encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    _call(_server(handler), {"question": "what will happen?", "prediction": True})
+
+    assert captured == {"question": "what will happen?", "prediction": True}
+
+
 def test_the_database_cannot_be_pinned_by_a_caller() -> None:
     # target_db exists on the API for benchmarking. Exposing it would invite an
     # agent to route around the semantic layer, so the tool has no such

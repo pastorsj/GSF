@@ -48,29 +48,39 @@ class PqlAnalysisPqlConflict(Exception):
 # ---------------------------------------------------------------------------
 
 
-def list_pql_analyses() -> list[dict[str, Any]]:
-    """Every PqlAnalysis as ``{id, name, description, pql}``, by name."""
+def list_pql_analyses(database_name: str | None = None) -> list[dict[str, Any]]:
+    """Every PqlAnalysis, optionally restricted to one database."""
+    statement = select(
+        s.pql_analysis.c.id,
+        s.pql_analysis.c.database_name,
+        s.pql_analysis.c.name,
+        s.pql_analysis.c.description,
+        s.pql_analysis.c.pql,
+    )
+    if database_name is not None:
+        statement = statement.where(s.pql_analysis.c.database_name == database_name)
     return [
         dict(r)
         for r in store().query_read(
-            select(
-                s.pql_analysis.c.id,
-                s.pql_analysis.c.name,
-                s.pql_analysis.c.description,
-                s.pql_analysis.c.pql,
-            ).order_by(s.pql_analysis.c.name)
+            statement.order_by(s.pql_analysis.c.database_name, s.pql_analysis.c.name)
         )
     ]
 
 
-def _find_conflict(column, value: str, exclude_id: str | None):
+def _find_conflict(
+    column,
+    value: str,
+    exclude_id: str | None,
+    database_name: str,
+):
     """Another analysis already using *value* in *column*, or ``None``.
 
     *exclude_id* is the analysis being edited — without it, saving one unchanged
     reports a conflict with itself.
     """
     statement = select(s.pql_analysis.c.id, s.pql_analysis.c.name).where(
-        column == value
+        column == value,
+        s.pql_analysis.c.database_name == database_name,
     )
     if exclude_id is not None:
         statement = statement.where(s.pql_analysis.c.id != exclude_id)
@@ -81,27 +91,40 @@ def _find_conflict(column, value: str, exclude_id: str | None):
 def find_pql_analysis_by_name(
     name: str,
     exclude_id: str | None,
+    database_name: str,
 ) -> dict[str, str] | None:
-    return _find_conflict(s.pql_analysis.c.name, name, exclude_id)
+    return _find_conflict(s.pql_analysis.c.name, name, exclude_id, database_name)
 
 
 def find_pql_analysis_by_pql(
     pql: str,
     exclude_id: str | None,
+    database_name: str,
 ) -> dict[str, str] | None:
-    return _find_conflict(s.pql_analysis.c.pql, pql, exclude_id)
+    return _find_conflict(s.pql_analysis.c.pql, pql, exclude_id, database_name)
 
 
-def get_pql_analysis_by_id(analysis_id: str) -> str | None:
+def get_pql_analysis_by_id(
+    analysis_id: str,
+    database_name: str | None = None,
+) -> str | None:
     """The analysis id if it exists, else ``None`` — an existence check."""
-    rows = store().query_read(
-        select(s.pql_analysis.c.id).where(s.pql_analysis.c.id == analysis_id).limit(1)
-    )
+    statement = select(s.pql_analysis.c.id).where(s.pql_analysis.c.id == analysis_id)
+    if database_name is not None:
+        statement = statement.where(
+            (s.pql_analysis.c.database_name == database_name)
+            | s.pql_analysis.c.database_name.is_(None)
+        )
+    rows = store().query_read(statement.limit(1))
     return rows[0]["id"] if rows else None
 
 
-def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, str]]:
-    """``{id: {id, name, description, pql}}``.
+def fetch_pql_analyses_by_ids(
+    analysis_ids: list[str],
+    *,
+    database_name: str,
+) -> dict[str, dict[str, str]]:
+    """Return analyses that belong to *database_name*, keyed by id.
 
     Values are stripped, and a missing one becomes ``""`` — these go straight
     into a prompt, where ``None`` would render as the word "None".
@@ -115,10 +138,14 @@ def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, st
         rows = store().query_read(
             select(
                 s.pql_analysis.c.id,
+                s.pql_analysis.c.database_name,
                 s.pql_analysis.c.name,
                 s.pql_analysis.c.description,
                 s.pql_analysis.c.pql,
-            ).where(s.pql_analysis.c.id.in_(list(analysis_ids)))
+            ).where(
+                s.pql_analysis.c.id.in_(list(analysis_ids)),
+                s.pql_analysis.c.database_name == database_name,
+            )
         )
     except Exception:
         logger.warning("fetch_pql_analyses_by_ids: query failed", exc_info=True)
@@ -127,6 +154,7 @@ def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, st
     return {
         row["id"]: {
             "id": row["id"],
+            "database_name": (row["database_name"] or "").strip(),
             "name": (row["name"] or "").strip(),
             "description": (row["description"] or "").strip(),
             "pql": (row["pql"] or "").strip(),
@@ -143,6 +171,7 @@ def fetch_pql_analyses_by_ids(analysis_ids: list[str]) -> dict[str, dict[str, st
 
 def upsert_pql_analysis_node(
     analysis_id: str,
+    database_name: str,
     name: str,
     description: str,
     pql: str,
@@ -155,12 +184,17 @@ def upsert_pql_analysis_node(
     have already run.
     """
     statement = insert(s.pql_analysis).values(
-        id=analysis_id, name=name, description=description, pql=pql
+        id=analysis_id,
+        database_name=database_name,
+        name=name,
+        description=description,
+        pql=pql,
     )
     store().query_write(
         statement.on_conflict_do_update(
             index_elements=[s.pql_analysis.c.id],
             set_={
+                "database_name": statement.excluded.database_name,
                 "name": statement.excluded.name,
                 "description": statement.excluded.description,
                 "pql": statement.excluded.pql,
@@ -190,7 +224,10 @@ def _pql_analysis_docs(analysis_id: str | None) -> list[dict[str, Any]]:
     away from the question a user actually asks.
     """
     statement = select(
-        s.pql_analysis.c.id, s.pql_analysis.c.name, s.pql_analysis.c.description
+        s.pql_analysis.c.id,
+        s.pql_analysis.c.database_name,
+        s.pql_analysis.c.name,
+        s.pql_analysis.c.description,
     )
     if analysis_id is not None:
         statement = statement.where(s.pql_analysis.c.id == analysis_id)
@@ -201,7 +238,14 @@ def _pql_analysis_docs(analysis_id: str | None) -> list[dict[str, Any]]:
         text = row["name"]
         if description is not None and str(description).strip():
             text += f": {description}"
-        docs.append({"text": text, "name": row["name"], "id": row["id"]})
+        docs.append(
+            {
+                "text": text,
+                "name": row["name"],
+                "id": row["id"],
+                "database_name": row["database_name"],
+            }
+        )
     return docs
 
 
@@ -209,7 +253,6 @@ def embed_pql_analyses(
     embed_params: "EmbedParams",
     vdb: "VDB",
     analysis_id: str | None = None,
-    database_name: str | None = None,
 ) -> None:
     """Embed PqlAnalysis docs and append them to *vdb*."""
     import pandas as pd
@@ -236,7 +279,7 @@ def embed_pql_analyses(
             "label": _LABEL,
             "name": item.get("name", ""),
             "source_path": path,
-            "database_name": database_name,
+            "database_name": item.get("database_name"),
         }
         rows.append(
             {

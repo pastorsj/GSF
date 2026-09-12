@@ -665,11 +665,15 @@ def capture_arg_reads(cap: Capture, ids: dict[str, Any]) -> None:
     )
     run(
         "pql_analyses.fetch_pql_analyses_by_ids",
-        lambda: pql_analyses.fetch_pql_analyses_by_ids([ids["pql_churn"]]),
+        lambda: pql_analyses.fetch_pql_analyses_by_ids(
+            [ids["pql_churn"]], database_name="pagila"
+        ),
     )
     run(
         "pql_analyses.find_pql_analysis_by_name",
-        lambda: pql_analyses.find_pql_analysis_by_name("Customer churn", None),
+        lambda: pql_analyses.find_pql_analysis_by_name(
+            "Customer churn", None, "pagila"
+        ),
     )
 
     # -- exploration -------------------------------------------------------

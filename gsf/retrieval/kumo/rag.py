@@ -29,6 +29,7 @@ _MAX_EXAMPLES = int(os.environ.get("KUMO_MAX_PQL_EXAMPLES", "5"))
 def fetch_pql_examples(
     semantic_retriever: Any,
     question: str,
+    database_name: str,
     k: int = _MAX_EXAMPLES,
 ) -> list[dict[str, str]]:
     """Return up to *k* verified PQL examples most similar to *question*.
@@ -45,6 +46,7 @@ def fetch_pql_examples(
             question,
             label_filter=[LABEL_PQL_ANALYSIS],
             per_label_k={LABEL_PQL_ANALYSIS: k},
+            database_name=database_name,
         )
     except Exception:
         logger.warning("fetch_pql_examples: semantic search failed", exc_info=True)
@@ -54,7 +56,7 @@ def fetch_pql_examples(
     if not ids:
         return []
 
-    analyses = fetch_pql_analyses_by_ids(ids)
+    analyses = fetch_pql_analyses_by_ids(ids, database_name=database_name)
 
     examples: list[dict[str, str]] = []
     for row in rows:  # preserve retrieval (best-first) order
@@ -64,7 +66,12 @@ def fetch_pql_examples(
         # name is the natural-language question; description is the reasoning.
         name = analysis.get("name") or ""
         reasoning = analysis.get("description") or ""
-        example = {"question": name or reasoning, "query": analysis["pql"]}
+        example = {
+            "id": analysis["id"],
+            "database_name": analysis["database_name"],
+            "question": name or reasoning,
+            "query": analysis["pql"],
+        }
         if reasoning:
             example["reasoning"] = reasoning
         examples.append(example)

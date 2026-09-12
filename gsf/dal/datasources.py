@@ -313,20 +313,62 @@ def fetch_table_by_id(table_id: str) -> dict[str, Any] | None:
     return _table_row(rows[0]) if rows else None
 
 
-def fetch_table_by_name(name: str) -> dict[str, Any] | None:
-    """The first table of that name, in *any* schema or database.
+def fetch_table_by_name(
+    name: str,
+    *,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Resolve one table by name and optional catalog scope.
 
-    Ambiguous by construction: a name is not unique across schemas or
-    databases. Ordered by id so repeated calls agree with each other — which row
-    wins is still arbitrary, but it is the same arbitrary row each time.
+    The historical unscoped lookup remains deterministic but ambiguous: the
+    first catalog path wins. Prediction callers provide a database and, for a
+    governed graph contract, a schema. Those scoped lookups fail closed when
+    more than one row still matches so a same-named table cannot silently bind
+    the prediction graph to the wrong source.
     """
-    rows = store().query_read(
-        _table_select()
+    statement = (
+        select(
+            s.catalog_table.c.id,
+            s.catalog_table.c.name,
+            s.catalog_database.c.name.label("database_name"),
+            s.catalog_schema.c.name.label("schema_name"),
+            s.catalog_table.c.table_type,
+            s.catalog_table.c.description,
+            s.catalog_table.c.pk,
+        )
+        .select_from(_table_join())
         .where(s.catalog_table.c.name == name)
-        .order_by(s.catalog_table.c.id)
-        .limit(1)
     )
-    return _table_row(rows[0]) if rows else None
+    if database_name is not None:
+        statement = statement.where(s.catalog_database.c.name == database_name)
+    if schema_name is not None:
+        statement = statement.where(s.catalog_schema.c.name == schema_name)
+
+    rows = store().query_read(
+        statement.order_by(
+            s.catalog_database.c.name,
+            s.catalog_schema.c.name,
+            s.catalog_table.c.id,
+        ).limit(2)
+    )
+    if not rows:
+        return None
+    if (database_name is not None or schema_name is not None) and len(rows) != 1:
+        logger.warning(
+            "fetch_table_by_name: scoped table %s.%s.%s is ambiguous",
+            database_name or "*",
+            schema_name or "*",
+            name,
+        )
+        return None
+    result = dict(rows[0])
+    if database_name is None and schema_name is None:
+        # Preserve the established unscoped DAL response. Prediction callers
+        # opt into the richer catalog identity needed to validate a contract.
+        result.pop("database_name", None)
+        result.pop("table_type", None)
+    return result
 
 
 def fetch_join_neighbors(table_id: str) -> list[dict[str, Any]]:

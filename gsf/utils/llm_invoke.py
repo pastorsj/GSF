@@ -6,6 +6,7 @@
 
 import contextlib
 import logging
+import math
 import os
 import random
 import threading
@@ -44,7 +45,21 @@ class StrictLLMOutputModel(BaseModel):
 
 
 RETRY_MAX_ATTEMPTS = 3
-LLM_INVOKE_TIMEOUT_S = int(os.environ.get("LLM_INVOKE_TIMEOUT_S", "120"))
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    """Read a positive finite duration from the environment."""
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise RuntimeError(f"{name} must be a positive finite number")
+    return value
+
+
+LLM_INVOKE_TIMEOUT_S = _positive_float_env("LLM_INVOKE_TIMEOUT_S", 120)
 
 # Concurrent LLM requests are unbounded here by default. A process-wide cap used
 # to live at this call site, defaulting to 6, to stop semantic compilation's
