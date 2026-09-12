@@ -4,9 +4,10 @@
 
 """DuckDB connector for in-process SQL execution.
 
-Wraps ``duckdb.connect()`` with helpers to register pandas DataFrames or
-scan CSV/Parquet/JSON files directly from the filesystem.  No server or Docker
-service is required — DuckDB runs fully in-process.
+Wraps ``duckdb.connect()`` for a governed database file. External filesystem
+and network access are disabled on the connection so model-authored SQL cannot
+read data outside that database. No server or Docker service is required —
+DuckDB runs fully in-process.
 
 This is the reference implementation of
 :class:`~gsf.connectors.base.SQLDatabase`.
@@ -55,7 +56,11 @@ class DuckDBDatabase(SQLDatabase):
         db_path = connection_string
         if db_path.startswith("duckdb://"):
             db_path = db_path[len("duckdb://") :]
-        self.conn = duckdb.connect(database=db_path, read_only=read_only)
+        self.conn = duckdb.connect(
+            database=db_path,
+            read_only=read_only,
+            config={"enable_external_access": False},
+        )
         self._database_name: str = self.execute("SELECT current_database()").iloc[0, 0]
         logger.debug(
             "DuckDB connected (database=%r, read_only=%s).",

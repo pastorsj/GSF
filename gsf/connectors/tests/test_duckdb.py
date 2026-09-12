@@ -78,6 +78,36 @@ def test_tables_enumerate_governed_views_with_catalog_type(tmp_path) -> None:
     ]
 
 
+def test_external_file_access_is_disabled(tmp_path) -> None:
+    path = tmp_path / "governed.duckdb"
+    external = tmp_path / "outside.csv"
+    external.write_text("secret\nnot-governed\n", encoding="utf-8")
+    connection = duckdb.connect(str(path))
+    connection.execute("CREATE TABLE governed (value INTEGER)")
+    connection.execute("INSERT INTO governed VALUES (1)")
+    connection.close()
+
+    database = DuckDBDatabase(str(path))
+    try:
+        assert database.execute("SELECT value FROM governed").iloc[0, 0] == 1
+        assert not bool(
+            database.execute("SELECT current_setting('enable_external_access')").iloc[
+                0, 0
+            ]
+        )
+        for sql in (
+            f"SELECT * FROM read_csv('{external.as_posix()}')",
+            f"SELECT * FROM read_text('{external.as_posix()}')",
+            f"SELECT * FROM glob('{tmp_path.as_posix()}/*')",
+        ):
+            with pytest.raises(duckdb.PermissionException):
+                database.execute(sql)
+        with pytest.raises(duckdb.InvalidInputException):
+            database.execute("SET enable_external_access = true")
+    finally:
+        database.close()
+
+
 def test_primary_and_foreign_keys_include_composite_column_pairs(tmp_path) -> None:
     path = tmp_path / "catalog.duckdb"
     connection = duckdb.connect(str(path))

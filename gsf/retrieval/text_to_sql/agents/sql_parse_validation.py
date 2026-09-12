@@ -65,6 +65,66 @@ def _vacuous_group_by_check_enabled() -> bool:
     return os.environ.get("DETECT_VACUOUS_GROUP_BY", "").strip().lower() in _TRUTHY
 
 
+def generated_sql_safety_error(sql: str, schemas: dict, dialects: list[str]) -> str:
+    """Reject executable SQL outside the governed catalog relation boundary."""
+    statements = None
+    for dialect in dialects:
+        try:
+            statements = sqlglot.parse(
+                sql, read=_SQLGLOT_DIALECTS.get(dialect, dialect)
+            )
+            break
+        except Exception:
+            continue
+    if statements is None:
+        return ""  # The existing catalog parser reports the syntax error.
+    statements = [statement for statement in statements if statement is not None]
+    if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+        return "Generated SQL must contain exactly one read-only query."
+
+    statement = statements[0]
+    cte_names = {
+        cte.alias_or_name.casefold()
+        for cte in statement.find_all(exp.CTE)
+        if cte.alias_or_name
+    }
+    governed_relations = 0
+    for table in statement.find_all(exp.Table):
+        if not isinstance(table.this, exp.Identifier):
+            return (
+                "Generated SQL cannot use table-valued functions or external "
+                "relations; query only tables in the governed catalog."
+            )
+        name = table.name
+        if not table.db and not table.catalog and name.casefold() in cte_names:
+            continue
+        schema_name = table.db.casefold() if table.db else ""
+        if schema_name:
+            schema = schemas.get(schema_name)
+            recognized = schema is not None and schema.table_exists(name)
+        else:
+            recognized = any(schema.table_exists(name) for schema in schemas.values())
+        if not recognized:
+            return (
+                f"Generated SQL references relation {table.sql()!r}, which is not "
+                "a table in the governed catalog."
+            )
+        governed_relations += 1
+
+    for lateral in statement.find_all(exp.Lateral):
+        if isinstance(lateral.this, exp.Func) and not isinstance(
+            lateral.this, exp.Unnest
+        ):
+            return (
+                "Generated SQL cannot use table-valued functions or external "
+                "relations; query only tables in the governed catalog."
+            )
+
+    if not governed_relations:
+        return "Generated SQL must query at least one table in the governed catalog."
+    return ""
+
+
 def _unwrap_projection(e: exp.Expression) -> exp.Expression:
     """Strip an alias wrapper so ``NULL AS x`` is seen as ``NULL``."""
     return e.this if isinstance(e, exp.Alias) else e
@@ -831,6 +891,9 @@ class SQLValidationAgent(BaseAgent):
     def _sql_parse_validation(schemas, sql: str, dialects: list[str]) -> dict:
         result: dict = {}
         try:
+            safety_error = generated_sql_safety_error(sql, schemas, dialects)
+            if safety_error:
+                raise ValueError(safety_error)
             parse_query_single(
                 sql=sql,
                 schemas=schemas,
