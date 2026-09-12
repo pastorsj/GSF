@@ -27,6 +27,7 @@ from gsf.retrieval.kumo.pql_gen import predict_all
 from gsf.retrieval.kumo.provider import KumoProviderCompatibilityError
 from gsf.retrieval.kumo.provider import KumoProviderReadiness
 from gsf.retrieval.kumo.provider import KumoProviderUnavailableError
+from gsf.utils import llm_invoke
 
 # The SDK's client-side per-table row cap (kumorfm.rfm.payload.validate_payload_table_rows).
 _ROW_LIMIT_ERROR = (
@@ -307,6 +308,50 @@ def test_generate_pql_rejects_out_of_graph_scope_before_llm_or_provider(
             prediction_scope=_prediction_scope(),
             prediction_scope_ids=("entity-1", "outside"),
         )
+
+
+def test_generate_pql_retries_rate_limited_llm_via_safe_invocation(
+    monkeypatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(llm_invoke.time, "sleep", sleeps.append)
+    monkeypatch.setattr(llm_invoke.random, "uniform", lambda *_args: 0.0)
+
+    class RateLimitedLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke(self, _messages):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("429 Too Many Requests")
+            return SimpleNamespace(
+                content="PREDICT entities.status FOR EACH entities.entity_id"
+            )
+
+    class Model:
+        def validate_pql(self, _query: str) -> None:
+            return None
+
+        def predict(self, _query: str, *, indices=None, **_kwargs) -> pd.DataFrame:
+            assert indices == ["entity-1"]
+            return pd.DataFrame({"ENTITY": indices, "STATUS_PRED": [0.75]})
+
+    llm = RateLimitedLLM()
+    result = generate_pql(
+        "Predict entity status",
+        llm=llm,
+        kumo_model=Model(),
+        connector=_UnexpectedConnector(),
+        graph_ddl="entities(entity_id ID, status categorical)  -- PRIMARY KEY (entity_id)",
+        available_entity_ids={"entities": ["entity-1"]},
+        max_tries=1,
+    )
+
+    assert result.success
+    assert result.attempts == 1
+    assert llm.calls == 3
+    assert sleeps == [2.0, 4.0]
 
 
 def test_predict_all_keeps_legacy_unscoped_entity_resolution() -> None:

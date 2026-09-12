@@ -4,6 +4,8 @@
 
 from typing import Any
 
+import pytest
+
 from gsf.retrieval.data_access import semantic_search
 from gsf.catalog.constants import Labels
 from gsf.semantic.constants import LABEL_PQL_ANALYSIS
@@ -32,6 +34,43 @@ def _table_hit(identifier: str, schema_name: str, distance: float) -> dict:
             "schema_name": schema_name,
         },
     }
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Embedding error occurred: 429",
+        "Embedding error occurred: Too Many Requests",
+    ],
+)
+def test_query_with_retry_recovers_from_rate_limit(monkeypatch, message: str) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(semantic_search.time, "sleep", sleeps.append)
+    monkeypatch.setattr(semantic_search.random, "uniform", lambda *_args: 0.0)
+
+    class RateLimitedRetriever:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def query(self, entity: str, **kwargs: Any) -> list[dict[str, Any]]:
+            assert entity == "orders"
+            assert kwargs == {"top_k": 3, "vdb_kwargs": {"where": "active"}}
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError(message)
+            return [{"id": "order-1"}]
+
+    retriever = RateLimitedRetriever()
+    rows = semantic_search._query_with_retry(
+        retriever,  # type: ignore[arg-type]
+        "orders",
+        3,
+        {"where": "active"},
+    )
+
+    assert rows == [{"id": "order-1"}]
+    assert retriever.calls == 2
+    assert sleeps == [2.0]
 
 
 def test_ordinary_search_excludes_same_named_governed_prediction_view(

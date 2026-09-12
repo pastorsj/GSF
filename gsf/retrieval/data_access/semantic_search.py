@@ -68,9 +68,12 @@ _GOVERNED_PATH_LABELS = frozenset({Labels.TABLE, Labels.COLUMN, LABEL_COLUMN_ATT
 # (observed as e.g. "502 Bad Gateway") currently has no retry anywhere in the
 # stack and silently degrades that query to zero candidates. These are
 # infrastructure blips, not a signal about the query itself, so retry with
-# backoff instead of failing straight through.
+# backoff instead of failing straight through. Rate limits are equally
+# transient: the same query succeeds once the provider window reopens.
 _EMBED_QUERY_RETRY_MAX_ATTEMPTS = 3
 _EMBED_QUERY_RETRYABLE_TOKENS = (
+    "429",
+    "Too Many Requests",
     "502",
     "Bad Gateway",
     "503",

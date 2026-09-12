@@ -40,7 +40,7 @@ from gsf.connectors.base import SQLDatabase
 from gsf.retrieval.kumo.graph_contract import GraphContractPredictionScope
 from gsf.retrieval.kumo.prompts import build_pql_prompt
 from gsf.retrieval.kumo.provider import is_nonrepairable_provider_error
-from gsf.utils.llm_invoke import invoke_text
+from gsf.utils.llm_invoke import safe_invoke_text as invoke_text
 
 logger = logging.getLogger(__name__)
 
