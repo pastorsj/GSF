@@ -76,9 +76,10 @@ were there last quarter?"*
 ## Tools
 
 `ask_question` is the one that answers questions: it runs GSF's structured-data
-agent and returns the answer, the SQL or PQL it ran, and the rows. The rest — `search_terms`,
-`describe_table`, `check_answerable` and friends — let an agent learn the
-vocabulary and check its assumptions first.
+agent and returns the answer, the SQL or PQL it ran, the rows, and bounded
+phrase-to-ontology-to-column lineage observed during semantic resolution. The
+rest — `search_terms`, `describe_table`, `check_answerable` and friends — let
+an agent learn the vocabulary and check its assumptions first.
 
 Every tool reads, and every tool works through the semantic layer: there is none
 for browsing databases, schemas, or raw columns. Nothing here modifies the
