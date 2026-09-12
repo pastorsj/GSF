@@ -33,6 +33,51 @@ def _table_hit(identifier: str, schema_name: str, distance: float) -> dict:
     }
 
 
+def test_semantic_rows_preserve_display_safe_physical_lineage() -> None:
+    retriever = _Retriever(
+        [
+            {
+                "text": "ColumnAttribute: Cooling Severity of Term Cooling Reading.",
+                "_distance": 0.01,
+                "metadata": {
+                    "id": "attr-cooling-severity",
+                    "name": "Cooling Severity",
+                    "term_name": "Cooling Reading",
+                    "label": "ColumnAttribute",
+                    "database_name": "ai_factory",
+                    "schema_name": "main",
+                    "table_name": "cooling_readings",
+                    "source_column": "severity",
+                    "data_type": "VARCHAR",
+                    "embedding": [0.1, 0.2],
+                },
+            }
+        ]
+    )
+    rows = semantic_search.search_semantic_index(
+        retriever,
+        "critical cooling readings",
+        label_filter=["ColumnAttribute"],
+        database_name="ai_factory",
+    )
+
+    assert rows == [
+        {
+            "text": "ColumnAttribute: Cooling Severity of Term Cooling Reading.",
+            "id": "attr-cooling-severity",
+            "label": "ColumnAttribute",
+            "score": 0.01,
+            "name": "Cooling Severity",
+            "term_name": "Cooling Reading",
+            "source_column": "severity",
+            "table_name": "cooling_readings",
+            "schema_name": "main",
+            "database_name": "ai_factory",
+            "data_type": "VARCHAR",
+        }
+    ]
+
+
 def test_ordinary_search_excludes_same_named_governed_prediction_view(
     monkeypatch,
 ) -> None:
@@ -67,7 +112,9 @@ def test_explicit_schema_search_can_inspect_governed_view(monkeypatch) -> None:
     retriever = _Retriever([_table_hit("prediction-events", "prediction", 0.01)])
 
     def unexpected(_database: str | None) -> set[tuple[str, str]]:
-        raise AssertionError("explicit schema search must not apply ordinary exclusions")
+        raise AssertionError(
+            "explicit schema search must not apply ordinary exclusions"
+        )
 
     monkeypatch.setattr(semantic_search, "_configured_governed_view_paths", unexpected)
 
@@ -106,7 +153,11 @@ def test_postgres_filter_excludes_governed_views_before_vector_limit(
     original_query = retriever.query
 
     def query_without_governed_hits(entity: str, **kwargs: Any) -> list[dict[str, Any]]:
-        retriever.hits = [hit for hit in retriever.hits if hit["metadata"]["schema_name"] != "prediction"]
+        retriever.hits = [
+            hit
+            for hit in retriever.hits
+            if hit["metadata"]["schema_name"] != "prediction"
+        ]
         return original_query(entity, **kwargs)
 
     retriever.query = query_without_governed_hits  # type: ignore[method-assign]

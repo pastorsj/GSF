@@ -80,6 +80,13 @@ class DataAnswer(BaseModel):
     truncated: bool = Field(
         default=False, description=f"True when more than {MAX_ROWS} rows matched."
     )
+    resolution_lineage: list[dict[str, str]] = Field(
+        default_factory=list,
+        description=(
+            "Observed mappings from extracted business phrases to governed "
+            "ontology objects and their physical table/column bindings."
+        ),
+    )
 
 
 def _parse_rows(raw: Any) -> list[dict[str, Any]]:
@@ -116,6 +123,16 @@ def _build_answer(payload: dict[str, Any]) -> DataAnswer:
         rows=rows[:MAX_ROWS],
         row_count=len(rows),
         truncated=len(rows) > MAX_ROWS,
+        resolution_lineage=[
+            {
+                str(key): str(value)
+                for key, value in item.items()
+                if key in {"phrase", "ontology_object", "table", "column"}
+                and isinstance(value, str)
+            }
+            for item in list(payload.get("resolution_lineage") or [])[:40]
+            if isinstance(item, dict)
+        ],
     )
 
 

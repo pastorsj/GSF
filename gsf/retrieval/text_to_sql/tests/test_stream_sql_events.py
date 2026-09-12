@@ -453,6 +453,53 @@ def test_stream_ends_with_a_result_event(
     assert events[-1]["answer"]["sql_code"] == "SELECT 42"
 
 
+def test_result_exports_observed_phrase_to_ontology_lineage(
+    main: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _run(
+        main,
+        monkeypatch,
+        [
+            {
+                "retrieve_candidates": {
+                    "path_state": {
+                        "retrieved_column_attributes": [
+                            {
+                                "id": "attr-1",
+                                "name": "Cooling Severity",
+                                "query_entities": ["critical cooling readings"],
+                                "schema_name": "main",
+                                "table_name": "cooling_readings",
+                                "source_column": "severity",
+                                "score": 0.01,
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "format_and_respond": {
+                    "path_state": {
+                        "final_response": {
+                            "response": "Site A had the most readings.",
+                            "sql_code": "SELECT site_id FROM cooling_readings",
+                        }
+                    }
+                }
+            },
+        ],
+    )
+
+    assert events[-1]["answer"]["resolution_lineage"] == [
+        {
+            "phrase": "critical cooling readings",
+            "ontology_object": "Cooling Severity",
+            "table": "main.cooling_readings",
+            "column": "severity",
+        }
+    ]
+
+
 def test_generator_iterates_lazily(
     main: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:

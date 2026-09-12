@@ -253,9 +253,7 @@ def _build_metadata_where_clause(
         parts.append(
             f"""metadata LIKE '%"schema_name":"{_escape_like(schema_name)}"%' ESCAPE '\\'"""
         )
-    for excluded_database, excluded_schema in sorted(
-        excluded_catalog_paths or set()
-    ):
+    for excluded_database, excluded_schema in sorted(excluded_catalog_paths or set()):
         parts.append(
             "NOT ("
             f"metadata LIKE '%\"database_name\":\"{_escape_like(excluded_database)}\"%' ESCAPE '\\' "
@@ -326,7 +324,20 @@ def _hits_to_semantic_rows(
             "label": lab,
             "score": score,
         }
-        for _field in ("name", "schema_name", "database_name", "data_type", "source"):
+        # These catalog identities are display-safe semantic lineage. Keep them
+        # with the candidate so downstream consumers can show the observed
+        # business-phrase -> ontology object -> physical-column path without
+        # reconstructing it from generated SQL or exposing embedding payloads.
+        for _field in (
+            "name",
+            "term_name",
+            "source_column",
+            "table_name",
+            "schema_name",
+            "database_name",
+            "data_type",
+            "source",
+        ):
             val = meta.get(_field)
             if val is not None:
                 row[_field] = val
@@ -371,9 +382,7 @@ def search_semantic_index(
     """
     fmt = _metadata_filter_format(retriever)
     excluded_catalog_paths = (
-        _configured_governed_view_paths(database_name)
-        if schema_name is None
-        else set()
+        _configured_governed_view_paths(database_name) if schema_name is None else set()
     )
 
     allowed_labels = {str(x) for x in (label_filter or []) if x is not None} or None

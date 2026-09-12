@@ -107,6 +107,35 @@ def test_returns_answer_sql_and_rows() -> None:
     assert not hasattr(result.data, "reasoning")
 
 
+def test_returns_typed_resolution_lineage_without_private_fields() -> None:
+    answer = dict(
+        _ANSWER,
+        resolution_lineage=[
+            {
+                "phrase": "critical cooling readings",
+                "ontology_object": "Cooling Severity",
+                "table": "main.cooling_readings",
+                "column": "severity",
+                "score": 0.01,
+                "reasoning": "private",
+            }
+        ],
+    )
+    mcp = _server(_stream(_sse({"type": "result", "answer": answer})))
+
+    result = _call(mcp, {"question": "Which sites had critical cooling readings?"})
+
+    assert result.data.resolution_lineage == [
+        {
+            "phrase": "critical cooling readings",
+            "ontology_object": "Cooling Severity",
+            "table": "main.cooling_readings",
+            "column": "severity",
+        }
+    ]
+    assert "private" not in repr(result.data)
+
+
 def test_forwards_agent_steps_as_progress() -> None:
     # A run takes tens of seconds. Without these the caller cannot tell a slow
     # answer from a hung one.

@@ -155,9 +155,66 @@ def _extract_answer(final_state: dict) -> dict:
         else:
             final_response = ""
 
-    if isinstance(final_response, dict):
-        return final_response
-    return {"response": str(final_response)}
+    answer = (
+        dict(final_response)
+        if isinstance(final_response, dict)
+        else {"response": str(final_response)}
+    )
+    lineage = _resolution_lineage(final_state.get("path_state") or {})
+    if lineage:
+        answer["resolution_lineage"] = lineage
+    return answer
+
+
+def _resolution_lineage(path_state: dict, *, limit: int = 40) -> list[dict[str, str]]:
+    """Project observed semantic candidates into a bounded public lineage.
+
+    Candidate retrieval attaches the exact extracted phrase(s) that produced a
+    ColumnAttribute hit. The semantic index supplies the governed object and
+    its physical binding. Export only those typed catalog identities; scores,
+    embeddings, prompts, and model reasoning remain private.
+    """
+
+    records: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    candidates = path_state.get("retrieved_column_attributes")
+    if not isinstance(candidates, list):
+        return records
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        ontology_object = str(candidate.get("name") or "").strip()
+        table = str(candidate.get("table_name") or "").strip()
+        schema = str(candidate.get("schema_name") or "").strip()
+        column = str(candidate.get("source_column") or "").strip()
+        if not ontology_object:
+            continue
+        qualified_table = f"{schema}.{table}" if schema and table else table
+        raw_phrases = candidate.get("query_entities")
+        if not isinstance(raw_phrases, list):
+            raw_phrase = candidate.get("query_entity")
+            raw_phrases = [raw_phrase] if isinstance(raw_phrase, str) else []
+        for raw_phrase in raw_phrases:
+            phrase = str(raw_phrase or "").strip()
+            if not phrase:
+                continue
+            identity = (phrase, ontology_object, qualified_table, column)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            record = {
+                "phrase": phrase,
+                "ontology_object": ontology_object,
+            }
+            if qualified_table:
+                record["table"] = qualified_table
+            if column:
+                record["column"] = column
+            records.append(record)
+            if len(records) >= limit:
+                return records
+    return records
 
 
 def _sql_about_to_run(node_name: str, node_output: dict, node_path_state: dict) -> str:
