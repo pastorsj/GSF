@@ -872,7 +872,7 @@ def test_provider_contract_failure_does_not_regenerate_pql(monkeypatch) -> None:
                     expected_model="kumo-rfm",
                     advertised_models=("kumo-relational",),
                     nvidia_sdfm_version="0.2.1",
-                    kumorfm_version="2.28.0",
+                    kumorfm_version="2.29.0",
                     error_code="KUMO_PROVIDER_MODEL_INCOMPATIBLE",
                 )
             )
@@ -913,7 +913,7 @@ def test_typed_provider_unavailability_repairs_only_when_retryable(
         expected_model="kumo-rfm",
         advertised_models=(),
         nvidia_sdfm_version="0.2.1",
-        kumorfm_version="2.28.0",
+        kumorfm_version="2.29.0",
         error_code="KUMO_PROVIDER_NOT_READY",
         retryable=retryable,
     )

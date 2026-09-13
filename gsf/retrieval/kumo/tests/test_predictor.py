@@ -65,10 +65,10 @@ def test_client_initialization_uses_compatibility_registry_only_when_readiness_s
         ready=True,
         expected_model="kumo-rfm",
         wire_model="kumo-relational",
-        compatibility_adapter="nvidia-sdfm-0.2.1-kumorfm-2.28.0-relational-model",
+        compatibility_adapter="nvidia-sdfm-0.2.1-kumorfm-2.29.0-relational-model",
         advertised_models=("kumo-relational",),
         nvidia_sdfm_version="0.2.1",
-        kumorfm_version="2.28.0",
+        kumorfm_version="2.29.0",
     )
     registry = object()
     client = object()

@@ -1,8 +1,11 @@
 import sys
+from importlib import metadata
 from unittest.mock import patch
 
 import httpx
 import pytest
+from gsf.retrieval.kumo.compatibility_contract import LEGACY_KUMORFM_VERSION
+from gsf.retrieval.kumo.compatibility_contract import LEGACY_SDFM_VERSION
 from gsf.retrieval.kumo.provider import KumoProviderCompatibilityError
 from gsf.retrieval.kumo.provider import KumoProviderReadiness
 from gsf.retrieval.kumo.provider import KumoProviderUnavailableError
@@ -26,6 +29,11 @@ def _transport(
         raise AssertionError(f"unexpected route: {request.url.path}")
 
     return httpx.MockTransport(handler)
+
+
+def test_reviewed_adapter_matches_the_locked_installed_sdk_pair() -> None:
+    assert metadata.version("nvidia-sdfm") == LEGACY_SDFM_VERSION
+    assert metadata.version("kumorfm") == LEGACY_KUMORFM_VERSION
 
 
 def test_provider_readiness_proves_installed_model_is_advertised() -> None:
@@ -78,7 +86,7 @@ def test_unreviewed_version_mismatch_does_not_import_private_adapter_module() ->
 
 
 def test_provider_readiness_enables_only_the_exact_reviewed_legacy_adapter() -> None:
-    versions = {"nvidia-sdfm": "0.2.1", "kumorfm": "2.28.0"}
+    versions = {"nvidia-sdfm": "0.2.1", "kumorfm": "2.29.0"}
     with (
         patch("gsf.retrieval.kumo.provider.installed_kumo_model", return_value="kumo-rfm"),
         patch("gsf.retrieval.kumo.provider._package_version", side_effect=versions.__getitem__),
@@ -91,7 +99,7 @@ def test_provider_readiness_enables_only_the_exact_reviewed_legacy_adapter() -> 
 
     assert readiness.ready is True
     assert readiness.wire_model == "kumo-relational"
-    assert readiness.compatibility_adapter == "nvidia-sdfm-0.2.1-kumorfm-2.28.0-relational-model"
+    assert readiness.compatibility_adapter == "nvidia-sdfm-0.2.1-kumorfm-2.29.0-relational-model"
 
 
 def test_require_provider_ready_raises_safe_typed_mismatch() -> None:
@@ -156,7 +164,7 @@ def test_typed_provider_unavailability_controls_repairability(retryable: bool, e
         expected_model="kumo-rfm",
         advertised_models=(),
         nvidia_sdfm_version="0.2.1",
-        kumorfm_version="2.28.0",
+        kumorfm_version="2.29.0",
         error_code="KUMO_PROVIDER_NOT_READY",
         retryable=retryable,
     )

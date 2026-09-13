@@ -8,7 +8,7 @@ The Kumo Python driver normally owns the wire-level model identifier. This
 module compares that identifier with the NIM's advertised models and returns a
 small, credential-free readiness receipt. One reviewed transition is supported
 through a client-local GSF adapter: exactly ``nvidia-sdfm==0.2.1`` with
-``kumorfm==2.28.0`` may translate ``kumo-rfm`` to ``kumo-relational``. Unknown
+``kumorfm==2.29.0`` may translate ``kumo-rfm`` to ``kumo-relational``. Unknown
 version/model combinations remain incompatible and fail closed.
 """
 
