@@ -40,6 +40,25 @@ _LIVE_ANSWER = {
     "thoughts": "- Constructing SQL: Count all rows in the Customers table.",
 }
 
+_GRAPH_RECEIPT = {
+    "schema_version": 1,
+    "database_name": "prediction_db",
+    "mode": "explicit",
+    "contract_revision": "sha256:" + "a" * 64,
+    "graph_revision": "sha256:" + "b" * 64,
+    "tables": [
+        {
+            "name": "entities",
+            "schema_name": "prediction",
+            "primary_key": ["entity_id"],
+            "time_column": None,
+            "loaded_rows": 2,
+        }
+    ],
+    "edges": [],
+    "truncated": False,
+}
+
 
 def _settings(chat_timeout_s: float = 900.0) -> Settings:
     return Settings(
@@ -134,6 +153,19 @@ def test_returns_typed_resolution_lineage_without_private_fields() -> None:
         }
     ]
     assert "private" not in repr(result.data)
+
+
+def test_returns_prediction_graph_receipt() -> None:
+    answer = dict(
+        _ANSWER,
+        sql_code="PREDICT outcome FOR EACH entities.entity_id",
+        graph_receipt=_GRAPH_RECEIPT,
+    )
+    mcp = _server(_stream(_sse({"type": "result", "answer": answer})))
+
+    result = _call(mcp, {"question": "Predict an outcome."})
+
+    assert result.data.graph_receipt == _GRAPH_RECEIPT
 
 
 def test_forwards_agent_steps_as_progress() -> None:

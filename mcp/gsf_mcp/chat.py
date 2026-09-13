@@ -87,6 +87,10 @@ class DataAnswer(BaseModel):
             "ontology objects and their physical table/column bindings."
         ),
     )
+    graph_receipt: dict[str, Any] | None = Field(
+        default=None,
+        description="Display-safe proof of the graph used for prediction.",
+    )
 
 
 def _parse_rows(raw: Any) -> list[dict[str, Any]]:
@@ -133,6 +137,11 @@ def _build_answer(payload: dict[str, Any]) -> DataAnswer:
             for item in list(payload.get("resolution_lineage") or [])[:40]
             if isinstance(item, dict)
         ],
+        graph_receipt=(
+            payload["graph_receipt"]
+            if isinstance(payload.get("graph_receipt"), dict)
+            else None
+        ),
     )
 
 

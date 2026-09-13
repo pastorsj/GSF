@@ -91,7 +91,12 @@ def test_ask_question_reports_a_structured_answer() -> None:
     ask = next(tool for tool in _tools() if tool.name == "ask_question")
 
     assert ask.outputSchema is not None
-    assert set(ask.outputSchema["properties"]) >= {"answer", "sql", "rows"}
+    assert set(ask.outputSchema["properties"]) >= {
+        "answer",
+        "graph_receipt",
+        "rows",
+        "sql",
+    }
 
 
 def test_handshake_advertises_the_gsf_version() -> None:
